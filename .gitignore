@@ -1,0 +1,27 @@
+# Thư mục chứa các tệp biên dịch Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Thư mục chứa môi trường ảo
+venv/
+env/
+.env/
+
+# Thư mục chứa các tệp build và phân phối
+build/
+dist/
+*.egg-info/
+
+# Thư mục chứa các tệp cấu hình của IDE
+.idea/
+.vscode/
+
+# Thư mục chứa các tệp cấu hình của hệ thống
+.pytest_cache/
+.coverage
+*.cover
+.hypothesis/
+
+# Thư mục chứa các tệp Jupyter Notebook checkpoints
+.ipynb_checkpoints/
