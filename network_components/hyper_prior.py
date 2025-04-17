@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from network_components.utils import LowerBound
+
 class PriorFunction(nn.Module):
     """
     Description:
@@ -81,19 +83,6 @@ class PriorFunction(nn.Module):
     
     def extra_repr(self):
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
-
-
-class LowerBound(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, bound):
-        ctx.save_for_backward(x, torch.tensor(bound))
-        return torch.max(x, torch.tensor(bound, device=x.device, dtype=x.dtype))
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, bound = ctx.saved_tensors
-        pass_through_if = x >= bound
-        return grad_output * pass_through_if.type(grad_output.dtype), None
 
 class HyperPrior(nn.Module):
     """
