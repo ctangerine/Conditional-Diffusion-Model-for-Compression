@@ -1,9 +1,11 @@
+import logging
 import sys
 import os
 
-from network_components.utils import NormalDistribution, quantize
 # Add parent directory to path so Python can find the network_components module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from LOGGER import setup_logger
+from network_components.utils import NormalDistribution, quantize
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,8 @@ from network_components.hyper_prior import HyperPrior
 from network_components.resize_input import DownSampling, UpSampling
 from network_components.resnet_block import ResnetBlock
 from network_components.variable_bitrate_condition import VariableBitrateCondition
+
+logger = setup_logger(name='CompressorLogger', log_file='compressor.log', level=logging.WARNING)
 
 class Compressor(nn.Module):
     """
@@ -145,11 +149,11 @@ class Compressor(nn.Module):
         Xây dựng các thành phần mạng chính: Encoder, Decoder, HyperEncoder, HyperDecoder.
         Sử dụng các cặp kênh vào/ra đã được tính toán trong __init__.
         """
-        print("--- Xây dựng Encoder ---")
+        logger.info("--- Xây dựng Encoder ---")
         # --- Xây dựng Encoder ---
         # Lặp qua các cặp kênh vào/ra của encoder
         for idx, (dim_in, dim_out) in enumerate(self.encoder_in_out_pairs):
-            print(f"Encoder Block {idx}: {dim_in} -> {dim_out}")
+            logger.info(f"Encoder Block {idx}: {dim_in} -> {dim_out}")
             # Tạo một khối gồm ResnetBlock, VariableBitrateCondition (tùy chọn), Downsample
             block = nn.ModuleList([
                 # group_norm=True chỉ cho lớp đầu tiên (ind == 0).
@@ -164,83 +168,54 @@ class Compressor(nn.Module):
             ])
             self.encoder.append(block)
 
-        print("\n--- Xây dựng Decoder ---")
+        logger.info("--- Xây dựng Decoder ---")
         # --- Xây dựng Decoder ---
         # Lặp qua các cặp kênh vào/ra của decoder (đã đảo ngược)
         num_decoder_blocks = len(self.decoder_in_out_pairs)
         for idx, (dim_in, dim_out) in enumerate(self.decoder_in_out_pairs):
             is_last = (idx >= num_decoder_blocks - 1) # Kiểm tra xem có phải khối cuối cùng không
-            print(f"Decoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
-
-            # Xác định số kênh ra cho Resnet và VBR trong khối này
-            # Logic gốc: Nếu là lớp cuối, output channels của ResNet/VBR bằng input channels (dim_in)
-            # Nếu không phải lớp cuối, output channels là dim_out
+            logger.info(f"Decoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
             resnet_vbr_out_dim = dim_in if is_last else dim_out
 
             # Tạo một khối gồm Upsample, ResnetBlock, VariableBitrateCondition (tùy chọn)
             # Thứ tự khác với encoder vì Upsample thường đứng trước Resnet trong decoder
             block = nn.ModuleList([
-                # Upsample: Tăng kích thước không gian. Nhận dim_in, trả về dim_out.
-                # Logic gốc phức tạp hơn ở đây, dùng resnet_vbr_out_dim làm kênh vào Upsample
-                # và dim_out làm kênh ra Upsample.
-                UpSampling(resnet_vbr_out_dim, dim_out), # Kênh vào Upsample là output của ResNet/VBR, kênh ra là dim_out mục tiêu
-
-                # ResnetBlock: Nhận dim_in (từ khối trước hoặc skip connection), trả về resnet_vbr_out_dim.
+                UpSampling(dim_in, dim_in),
                 ResnetBlock(dim_in, resnet_vbr_out_dim),
-
-                # VariableBitrateCondition: Thêm điều kiện bitrate nếu cần.
                 VariableBitrateCondition(1, resnet_vbr_out_dim) if self.bitrate_conditional else nn.Identity(),
-
-                # Lưu ý: Thứ tự Upsample/Resnet có thể cần điều chỉnh tùy theo thiết kế cụ thể
-                # và cách kết nối skip connections. Đoạn code này cố gắng bám sát logic gốc nhất có thể.
             ])
             self.decoder.append(block)
 
 
-        print("\n--- Xây dựng Hyper Encoder ---")
+        logger.info("--- Xây dựng Hyper Encoder ---")
         # --- Xây dựng Hyper Encoder ---
         # Lặp qua các cặp kênh vào/ra của hyper encoder
+        downscale_shape = []
         num_hyper_enc_blocks = len(self.hyper_encoder_in_out_pairs)
         for idx, (dim_in, dim_out) in enumerate(self.hyper_encoder_in_out_pairs):
             is_last = (idx >= num_hyper_enc_blocks - 1) # Kiểm tra khối cuối
-            print(f"HyperEncoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
-
-            # Tạo một khối gồm Conv2d, VariableBitrateCondition (tùy chọn), LeakyReLU (tùy chọn)
+            logger.info(f"HyperEncoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
             block = nn.ModuleList([
-                # Lớp Convolution:
-                # - Lớp đầu tiên (ind == 0): Conv 3x3, stride 1 (không thay đổi kích thước).
-                # - Các lớp sau: Conv 5x5, stride 2 (downsampling).
                 nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1) if idx == 0 else nn.Conv2d(dim_in, dim_out, kernel_size=5, stride=2, padding=2),
-
                 # VariableBitrateCondition: Thêm nếu bitrate_conditional=True và *không phải* lớp cuối.
                 VariableBitrateCondition(1, dim_out) if (self.bitrate_conditional and not is_last) else nn.Identity(),
-
-                # Activation: Dùng LeakyReLU cho các lớp không phải cuối cùng.
                 nn.LeakyReLU(0.2) if not is_last else nn.Identity()
             ])
             self.hyper_encoder.append(block)
 
-        print("\n--- Xây dựng Hyper Decoder ---")
-        # --- Xây dựng Hyper Decoder ---
+        logger.info("--- Xây dựng Hyper Decoder ---")
+        # --- Xây dựng Hyper Decoder --- 
         # Lặp qua các cặp kênh vào/ra của hyper decoder (đã đảo ngược)
         num_hyper_dec_blocks = len(self.hyper_decoder_in_out_pairs)
         for idx, (dim_in, dim_out) in enumerate(self.hyper_decoder_in_out_pairs):
             is_last = (idx >= num_hyper_dec_blocks - 1) # Kiểm tra khối cuối
-            print(f"HyperDecoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
+            logger.info(f"HyperDecoder Block {idx}: {dim_in} -> {dim_out} (is_last={is_last})")
 
              # Tạo một khối gồm ConvTranspose2d/Conv2d, VariableBitrateCondition (tùy chọn), LeakyReLU (tùy chọn)
             block = nn.ModuleList([
-                # Lớp Convolution Transpose hoặc Convolution:
-                # - Các lớp không phải cuối: ConvTranspose 5x5, stride 2 (upsampling).
-                #   output_padding=1 thường cần thiết để kích thước nhân đôi chính xác.
-                # - Lớp cuối cùng (is_last=True): Conv 3x3, stride 1.
                 nn.ConvTranspose2d(dim_in, dim_out, kernel_size=5, stride=2, padding=2, output_padding=1) if not is_last \
                 else nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1),
-
-                # VariableBitrateCondition: Thêm nếu bitrate_conditional=True và *không phải* lớp cuối.
                 VariableBitrateCondition(1, dim_out) if (self.bitrate_conditional and not is_last) else nn.Identity(),
-
-                # Activation: Dùng LeakyReLU cho các lớp không phải cuối cùng.
                 nn.LeakyReLU(0.2) if not is_last else nn.Identity()
             ])
             self.hyper_decoder.append(block)
@@ -261,13 +236,13 @@ class Compressor(nn.Module):
                 - q_hyper_latent (Tensor): Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
                 - state4bpp (dict): Dictionary chứa các tensor trung gian cần thiết để tính toán BPP (latent, hyper_latent, latent_distribution).
         """
-        print("--- Bắt đầu Encode ---")
+        logger.info("--- Bắt đầu Encode ---")
         current_features = input_image
 
         # 1. Mạng mã hóa chính (Encoder)
-        print("Chạy qua Encoder chính...")
+        logger.info("Chạy qua Encoder chính...")
         # self.enc là ModuleList của các ModuleList con [ResnetBlock, VBR/Identity, Downsample]
-        for i, encoder_block in enumerate(self.enc):
+        for i, encoder_block in enumerate(self.encoder):
             resnet_layer = encoder_block[0]
             vbr_layer = encoder_block[1] # VBRCondition hoặc nn.Identity
             downsample_layer = encoder_block[2]
@@ -277,46 +252,50 @@ class Compressor(nn.Module):
             if self.bitrate_conditional:
                 current_features = vbr_layer(current_features, bitrate_condition)
             current_features = downsample_layer(current_features)
-            # print(f"Encoder block {i} output shape: {current_features.shape}")
 
         # Lưu trữ biểu diễn ẩn chính trước khi lượng tử hóa
         latent = current_features
-        print(f"Latent shape: {latent.shape}")
+        logger.info(f"Latent shape: {latent.shape}")
 
         # 2. Mạng mã hóa siêu tiên nghiệm (Hyper Encoder)
-        print("Chạy qua Hyper Encoder...")
+        logger.info("Chạy qua Hyper Encoder...")
         hyper_encoder_input = latent # Đầu vào là latent từ encoder chính
         # self.hyper_enc là ModuleList của các ModuleList con [Conv, VBR/Identity, Act/Identity]
-        num_hyper_enc_layers = len(self.hyper_enc)
-        for i, hyper_enc_block in enumerate(self.hyper_enc):
+        num_hyper_enc_layers = len(self.hyper_encoder)
+        downscale_shape = [hyper_encoder_input.shape] # Lưu trữ kích thước đầu vào cho mỗi khối
+        for i, hyper_enc_block in enumerate(self.hyper_encoder):
             conv_layer = hyper_enc_block[0]
             vbr_layer = hyper_enc_block[1]
             activation_layer = hyper_enc_block[2]
+
+            # Lưu lại kích thước sau khi downscale
+            downscale_shape.append(hyper_encoder_input.shape) # Lưu trữ kích thước đầu vào cho mỗi khối
 
             hyper_encoder_input = conv_layer(hyper_encoder_input)
             # Áp dụng VBR, trừ lớp cuối cùng
             if self.bitrate_conditional and i < (num_hyper_enc_layers - 1):
                 hyper_encoder_input = vbr_layer(hyper_encoder_input, bitrate_condition)
             hyper_encoder_input = activation_layer(hyper_encoder_input)
-            # print(f"HyperEncoder block {i} output shape: {hyper_encoder_input.shape}")
+            logger.info(f"HyperEncoder block {i} output shape: {hyper_encoder_input.shape}")
 
         # Lưu trữ biểu diễn ẩn siêu tiên nghiệm trước khi lượng tử hóa
         hyper_latent = hyper_encoder_input
-        print(f"Hyper latent shape: {hyper_latent.shape}")
+        logger.info(f"Hyper latent shape: {hyper_latent.shape}")
 
         # 3. Lượng tử hóa Hyper-Latent (sử dụng trong Hyper Decoder và tính BPP)
         # Sử dụng chế độ 'dequantize' (làm tròn) và median từ prior
         # Trong quá trình huấn luyện, hàm bpp sẽ lượng tử hóa lại với 'noise'
-        q_hyper_latent = quantize(hyper_latent, "dequantize", self.prior.medians)
-        print(f"Quantized Hyper latent shape: {q_hyper_latent.shape}")
+        q_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
+        logger.info(f"Quantized Hyper latent shape: {q_hyper_latent.shape}")
 
 
         # 4. Mạng giải mã siêu tiên nghiệm (Hyper Decoder)
-        print("Chạy qua Hyper Decoder...")
+        logger.info("Chạy qua Hyper Decoder...")
         hyper_decoder_input = q_hyper_latent # Đầu vào là hyper-latent đã lượng tử hóa
         # self.hyper_dec là ModuleList của các ModuleList con [ConvT/Conv, VBR/Identity, Act/Identity]
-        num_hyper_dec_layers = len(self.hyper_dec)
-        for i, hyper_dec_block in enumerate(self.hyper_dec):
+        num_hyper_dec_layers = len(self.hyper_decoder)
+        for i, hyper_dec_block in enumerate(self.hyper_decoder):
+
             deconv_layer = hyper_dec_block[0]
             vbr_layer = hyper_dec_block[1]
             activation_layer = hyper_dec_block[2]
@@ -326,25 +305,29 @@ class Compressor(nn.Module):
             if self.bitrate_conditional and i < (num_hyper_dec_layers - 1):
                 hyper_decoder_input = vbr_layer(hyper_decoder_input, bitrate_condition)
             hyper_decoder_input = activation_layer(hyper_decoder_input)
-            # print(f"HyperDecoder block {i} output shape: {hyper_decoder_input.shape}")
 
+            # Đảm bảo quá trình upscale không gây lỗi mismatch
+            if hyper_decoder_input.shape != downscale_shape[-(i+1)]:
+                hyper_decoder_input = nn.functional.interpolate(hyper_decoder_input, size=downscale_shape[-(i+1)][2:], mode='bilinear', align_corners=False)
+
+            logger.info(f"HyperDecoder block {i} output shape: {hyper_decoder_input.shape}")
         # Đầu ra của hyper-decoder chứa tham số (mean, scale) cho phân phối của latent
         hyper_decoder_output = hyper_decoder_input
-        print(f"Hyper Decoder output shape: {hyper_decoder_output.shape}")
+        logger.info(f"Hyper Decoder output shape: {hyper_decoder_output.shape}")
 
         # 5. Tạo phân phối cho Latent và Lượng tử hóa Latent
         # Chia đầu ra hyper-decoder thành mean và scale dọc theo chiều kênh
         mean, scale = hyper_decoder_output.chunk(2, dim=1)
         # Đảm bảo scale không quá nhỏ (ổn định số học)
         scale = scale.clamp(min=0.1) # Giá trị clamp có thể cần điều chỉnh
-        print(f"Latent distribution params shapes: mean={mean.shape}, scale={scale.shape}")
+        logger.info(f"Latent distribution params shapes: mean={mean.shape}, scale={scale.shape}")
 
         # Tạo đối tượng phân phối Gaussian
         latent_distribution = NormalDistribution(mean, scale)
 
         # Lượng tử hóa latent chính (sử dụng mean của phân phối làm tâm)
         q_latent = quantize(latent, "dequantize", latent_distribution.mean)
-        print(f"Quantized Latent shape: {q_latent.shape}")
+        logger.info(f"Quantized Latent shape: {q_latent.shape}")
 
 
         # 6. Chuẩn bị đầu ra
@@ -354,7 +337,7 @@ class Compressor(nn.Module):
             "hyper_latent": hyper_latent,     # Hyper-latent gốc (trước quantization)
             "latent_distribution": latent_distribution, # Đối tượng phân phối của latent
         }
-        print("--- Kết thúc Encode ---")
+        logger.info("--- Kết thúc Encode ---")
         return q_latent, q_hyper_latent, state4bpp
 
 
@@ -375,22 +358,20 @@ class Compressor(nn.Module):
             list[Tensor]: Danh sách các tensor đầu ra từ mỗi khối của decoder,
                           được đảo ngược thứ tự.
         """
-        print("--- Bắt đầu Decode ---")
+        logger.info("--- Bắt đầu Decode ---")
         intermediate_outputs = []
         current_features = q_latent # Bắt đầu với latent đã lượng tử hóa
-        print(f"Decoder input shape: {current_features.shape}")
+        logger.info(f"Decoder input shape: {current_features.shape}")
 
         # self.dec là ModuleList của các ModuleList con [Upsample, ResnetBlock, VBR/Identity]
-        for i, decoder_block in enumerate(self.dec):
+        for i, decoder_block in enumerate(self.decoder):
             upsample_layer = decoder_block[0]
             resnet_layer = decoder_block[1]
             vbr_layer = decoder_block[2] # VBRCondition hoặc nn.Identity
 
-            # Áp dụng các lớp theo thứ tự đã xây dựng
             current_features = upsample_layer(current_features)
-            # print(f"Decoder block {i} after Upsample shape: {current_features.shape}")
+
             current_features = resnet_layer(current_features)
-            # print(f"Decoder block {i} after ResNet shape: {current_features.shape}")
 
             # Áp dụng điều kiện bitrate nếu được kích hoạt
             if self.bitrate_conditional:
@@ -398,9 +379,9 @@ class Compressor(nn.Module):
 
             # Lưu lại đầu ra của khối này (theo logic gốc)
             intermediate_outputs.append(current_features)
-            print(f"Decoder block {i} final output shape: {current_features.shape}")
+            logger.info(f"Decoder block {i} final output shape: {current_features.shape}")
 
-        print("--- Kết thúc Decode ---")
+        logger.info("--- Kết thúc Decode ---")
         # Trả về danh sách các đầu ra đã đảo ngược (theo logic gốc)
         return intermediate_outputs[::-1]
 
@@ -415,14 +396,14 @@ class Compressor(nn.Module):
         Returns:
             Tensor: Giá trị BPP ước lượng (thường là tensor 1 chiều, mỗi phần tử cho 1 ảnh trong batch).
         """
-        print("--- Bắt đầu tính BPP ---")
+        logger.info("--- Bắt đầu tính BPP ---")
         B, _, H, W = input_shape # Lấy kích thước ảnh gốc
         # Lấy các tensor cần thiết từ state4bpp
         latent = state4bpp["latent"]
         hyper_latent = state4bpp["hyper_latent"]
         latent_distribution = state4bpp["latent_distribution"]
-        print(f"Input shape for BPP: B={B}, H={H}, W={W}")
-        print(f"Latent shape: {latent.shape}, Hyper latent shape: {hyper_latent.shape}")
+        logger.info(f"Input shape for BPP: B={B}, H={H}, W={W}")
+        logger.info(f"Latent shape: {latent.shape}, Hyper latent shape: {hyper_latent.shape}")
 
 
         # Lượng tử hóa lại (khác nhau giữa training và evaluation)
@@ -430,32 +411,30 @@ class Compressor(nn.Module):
             # Khi training, thêm nhiễu lượng tử hóa để huấn luyện mô hình entropy
             q_hyper_latent = quantize(hyper_latent, "noise")
             q_latent = quantize(latent, "noise")
-            print("BPP calculation in training mode (using noise quantization)")
+            logger.info("BPP calculation in training mode (using noise quantization)")
         else:
             # Khi evaluation, sử dụng làm tròn (dequantize) giống như trong encode
-            q_hyper_latent = quantize(hyper_latent, "dequantize", self.prior.medians)
+            q_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
             q_latent = quantize(latent, "dequantize", latent_distribution.mean)
-            print("BPP calculation in eval mode (using dequantize)")
+            logger.info("BPP calculation in eval mode (using dequantize)")
 
         # Tính rate (số bit) từ likelihood
         # Rate = -log2(Likelihood)
         # Sử dụng likelihood từ HyperPrior cho q_hyper_latent
-        hyper_rate = -self.prior.likelihood(q_hyper_latent).log2()
+        hyper_rate = -self.hyper_prior.likelihood(q_hyper_latent).log2()
         # Sử dụng likelihood từ NormalDistribution (tham số hóa bởi hyper-decoder) cho q_latent
         cond_rate = -latent_distribution.likelihood(q_latent).log2()
-        print(f"Hyper rate shape: {hyper_rate.shape}, Cond rate shape: {cond_rate.shape}")
+        logger.info(f"Hyper rate shape: {hyper_rate.shape}, Cond rate shape: {cond_rate.shape}")
 
 
         # Tính tổng số bit cho mỗi ảnh trong batch
         total_bits = hyper_rate.sum(dim=(1, 2, 3)) + cond_rate.sum(dim=(1, 2, 3))
-        print(f"Total bits per image shape: {total_bits.shape}")
-
-
+        logger.info(f"Total bits per image shape: {total_bits.detach().cpu().numpy()}")
         # Tính BPP bằng cách chia tổng số bit cho số pixel
         num_pixels = H * W
         bpp_estimate = total_bits / num_pixels
-        print(f"Calculated BPP shape: {bpp_estimate.shape}")
-        print("--- Kết thúc tính BPP ---")
+        logger.info(f"Calculated BPP shape: {bpp_estimate.shape}")
+        logger.info("--- Kết thúc tính BPP ---")
         return bpp_estimate
 
 
@@ -480,8 +459,9 @@ class Compressor(nn.Module):
                 - "q_latent": Biểu diễn ẩn chính đã lượng tử hóa.
                 - "q_hyper_latent": Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
         """
-        print("--- Bắt đầu Forward ---")
+        logger.info("--- Bắt đầu Forward ---")
         # 1. Mã hóa
+        logger.critical(f"input image shape: {input_image.shape}")
         q_latent, q_hyper_latent, state4bpp = self.encode(input_image, bitrate_condition)
 
         # 2. Tính BPP
@@ -491,7 +471,7 @@ class Compressor(nn.Module):
         # Đầu vào của decode là latent đã lượng tử hóa
         decoded_output = self.decode(q_latent, bitrate_condition)
 
-        print("--- Kết thúc Forward ---")
+        logger.info("--- Kết thúc Forward ---")
         # 4. Trả về kết quả
         return {
             "output": decoded_output,      # Kết quả từ decoder
@@ -509,37 +489,34 @@ class Compressor(nn.Module):
 
         
 # Testing the Compressor class
-# compressor = Compressor(
-#     in_channel=3,
-#     out_channel=3,
-#     base_channel=64,
-#     channel_multiplier=[1, 2, 3, 3],
-#     hyperprior_channel_multiplier=[3, 3, 3]
-# )
+compressor = Compressor(
+    in_channel=3,
+    out_channel=3,
+    base_channel=64,
+    channel_multiplier=[1, 2, 3, 3],
+    hyperprior_channel_multiplier=[3, 3, 3]
+)
 
-# print("--- Kênh Encoder ---")
-# print("Kênh:", compressor.encoder_channels)
-# print("Cặp In/Out:", compressor.encoder_in_out_pairs)
+try:
+    image = 'dogpicture.png'
+    # Load the image and convert it to a tensor
+    from PIL import Image
+    import torchvision.transforms as transforms
 
-# print("\n--- Kênh Decoder ---")
-# print("Kênh:", compressor.decoder_channels)
-# print("Cặp In/Out:", compressor.decoder_in_out_pairs)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize((1200, 600)),  # Resize to (256, 256) for testing
+    ])
 
-# print("\n--- Kênh Hyper Encoder ---")
-# print("Kênh:", compressor.hyper_encoder_channels)
-# print("Cặp In/Out:", compressor.hyper_encoder_in_out_pairs)
+    img = Image.open(image).convert('RGB')
+    img_tensor = transform(img).unsqueeze(0)  # Add batch dimension (N, C, H, W)
 
-# print("\n--- Kênh Hyper Decoder ---")
-# print("Kênh:", compressor.hyper_decoder_channels)
-# print("Cặp In/Out:", compressor.hyper_decoder_in_out_pairs)
+    dump_tensor = img_tensor
+    output = compressor(dump_tensor, bitrate_condition=None)
+    for key, value in output.items():
+        logger.info(f"{key}: {value.shape if isinstance(value, torch.Tensor) else len(value)}")
 
-# print(f"\nBitrate Conditional (VBR): {compressor.bitrate_conditional}")
-# print(f"Prior: {compressor.prior}")
-
-
-compressor = Compressor(bitrate_conditional=True) # Tạo instance và gọi build_network bên trong __init__
-print("\nKiểm tra các mạng đã xây dựng:")
-print("Encoder blocks:", len(compressor.encoder))
-print("Decoder blocks:", len(compressor.decoder))
-print("HyperEncoder blocks:", len(compressor.hyper_encoder))
-print("HyperDecoder blocks:", len(compressor.hyper_decoder))
+    logger.critical("Testing completed successfully.")
+except Exception as e:
+    logger.error(f"Error during testing: {e}")
+    raise e
