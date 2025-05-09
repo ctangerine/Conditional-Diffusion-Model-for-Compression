@@ -70,7 +70,7 @@ class LosslessVideoGenerator:
 
 if __name__ == "__main__":
     # Example usage
-    frame_folder = "D:\\videos\\VisDrone2019-VID-val\\sequences\\uav0000339_00001_v"
+    frame_folder = "D:\\videos\\VisDrone2019-VID-val\\sequences\\uav0000182_00000_v"
     output_path = "D:\\videos\\video2.avi"
     video_generator = LosslessVideoGenerator(frame_folder, output_path)
     video_generator.generate_video(True, 15)
