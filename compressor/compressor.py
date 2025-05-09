@@ -2,6 +2,8 @@ import logging
 import sys
 import os
 
+import numpy as np
+
 # Add parent directory to path so Python can find the network_components module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from LOGGER import setup_logger
@@ -15,7 +17,7 @@ from network_components.resize_input import DownSampling, UpSampling
 from network_components.resnet_block import ResnetBlock
 from network_components.variable_bitrate_condition import VariableBitrateCondition
 
-logger = setup_logger(name='CompressorLogger', log_file='compressor.log', level=logging.WARNING)
+logger = setup_logger(name='CompressorLogger', log_file='compressor.log', level=logging.DEBUG)
 
 class Compressor(nn.Module):
     """
@@ -56,6 +58,8 @@ class Compressor(nn.Module):
         self.out_channel = out_channel
         self.base_channel = base_channel
         self.bitrate_conditional = bitrate_conditional # vbr flag
+
+        self.encode_shape = []
 
         ## --- Tính toán số kênh cho mạng chính (Encoder/Decoder) ---
 
@@ -180,9 +184,9 @@ class Compressor(nn.Module):
             # Tạo một khối gồm Upsample, ResnetBlock, VariableBitrateCondition (tùy chọn)
             # Thứ tự khác với encoder vì Upsample thường đứng trước Resnet trong decoder
             block = nn.ModuleList([
-                UpSampling(dim_in, dim_in),
                 ResnetBlock(dim_in, resnet_vbr_out_dim),
                 VariableBitrateCondition(1, resnet_vbr_out_dim) if self.bitrate_conditional else nn.Identity(),
+                UpSampling(resnet_vbr_out_dim, dim_out),
             ])
             self.decoder.append(block)
 
@@ -242,16 +246,19 @@ class Compressor(nn.Module):
         # 1. Mạng mã hóa chính (Encoder)
         logger.info("Chạy qua Encoder chính...")
         # self.enc là ModuleList của các ModuleList con [ResnetBlock, VBR/Identity, Downsample]
+        self.encode_shape.append(current_features.shape) # Lưu trữ kích thước đầu vào cho mỗi khối
         for i, encoder_block in enumerate(self.encoder):
             resnet_layer = encoder_block[0]
             vbr_layer = encoder_block[1] # VBRCondition hoặc nn.Identity
             downsample_layer = encoder_block[2]
 
+            self.encode_shape.append(current_features.shape)
+
             current_features = resnet_layer(current_features)
             # Áp dụng điều kiện bitrate nếu được kích hoạt
             if self.bitrate_conditional:
                 current_features = vbr_layer(current_features, bitrate_condition)
-            current_features = downsample_layer(current_features)
+            current_features = downsample_layer(current_features) # Lưu trữ kích thước đầu vào cho mỗi khối
 
         # Lưu trữ biểu diễn ẩn chính trước khi lượng tử hóa
         latent = current_features
@@ -365,17 +372,21 @@ class Compressor(nn.Module):
 
         # self.dec là ModuleList của các ModuleList con [Upsample, ResnetBlock, VBR/Identity]
         for i, decoder_block in enumerate(self.decoder):
-            upsample_layer = decoder_block[0]
-            resnet_layer = decoder_block[1]
-            vbr_layer = decoder_block[2] # VBRCondition hoặc nn.Identity
-
-            current_features = upsample_layer(current_features)
+            upsample_layer = decoder_block[2]
+            resnet_layer = decoder_block[0]
+            vbr_layer = decoder_block[1] # VBRCondition hoặc nn.Identity
 
             current_features = resnet_layer(current_features)
 
             # Áp dụng điều kiện bitrate nếu được kích hoạt
             if self.bitrate_conditional:
                 current_features = vbr_layer(current_features, bitrate_condition)
+
+            current_features = upsample_layer(current_features)
+
+            # Đảm bảo quá trình upscale
+            if current_features.shape != self.encode_shape[-(i+1)]:
+                current_features = nn.functional.interpolate(current_features, size=self.encode_shape[-(i+1)][2:], mode='bilinear', align_corners=False)
 
             # Lưu lại đầu ra của khối này (theo logic gốc)
             intermediate_outputs.append(current_features)
@@ -515,6 +526,43 @@ try:
     output = compressor(dump_tensor, bitrate_condition=None)
     for key, value in output.items():
         logger.info(f"{key}: {value.shape if isinstance(value, torch.Tensor) else len(value)}")
+
+    for thing in output['output']:
+        logger.critical(f"Output shape: {thing.shape}")
+        logger.critical(f"Output dtype: {thing.dtype}")
+        logger.critical(f"Output device: {thing.device}")
+        # Draw thing
+        if thing.shape == (1, 3, 1200, 608):
+            thing = thing.cpu().detach().numpy()
+            thing = thing.squeeze(0).transpose(2, 1, 0)  # Convert to (H, W, C) format
+            thing = (thing * 255).astype(np.uint8)  # Convert to uint8 for image display
+
+            thing = Image.fromarray(thing)
+            thing.show()
+
+
+
+    def tensor_size_in_MB(tensor):
+        """Tính kích thước của tensor (theo MB)"""
+        if tensor is None:
+            return 0
+        return tensor.element_size() * tensor.nelement() / (1024 * 1024)
+
+    # Log size of output in MB
+    logger.critical(f"Input size: {tensor_size_in_MB(dump_tensor):.8f} MB")
+    logger.critical(f"Output size: {tensor_size_in_MB(output['output']):.8f} MB")
+    logger.critical(f"q_latent size: {tensor_size_in_MB(output['q_latent']):.8f} MB")
+    logger.critical(f"q_hyper_latent size: {tensor_size_in_MB(output['q_hyper_latent']):.8f} MB")
+
+    # bpp thường là scalar hoặc float, nên không phải tensor — xử lý riêng nếu cần
+    bpp_size = sys.getsizeof(output['bpp']) / (1024 * 1024)
+    logger.critical(f"bpp size (approx): {bpp_size:.8f} MB")
+
+    # Tính tỷ lệ nén
+    input_size = tensor_size_in_MB(dump_tensor)
+    output_size = tensor_size_in_MB(output['output'])
+    ratio = output_size / input_size if input_size > 0 else 0
+    logger.critical(f"Compression ratio (output/input): {ratio:.8f}")
 
     logger.critical("Testing completed successfully.")
 except Exception as e:
