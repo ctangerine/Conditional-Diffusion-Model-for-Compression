@@ -1,0 +1,71 @@
+2025-05-09 22:18:01 - CompressorLogger - INFO     - --- Xây dựng Encoder ---
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Encoder Block 0: 3 -> 64
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Encoder Block 1: 64 -> 128
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Encoder Block 2: 128 -> 192
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Encoder Block 3: 192 -> 192
+2025-05-09 22:18:01 - CompressorLogger - INFO     - --- Xây dựng Decoder ---
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Decoder Block 0: 192 -> 192 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Decoder Block 1: 192 -> 128 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Decoder Block 2: 128 -> 64 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - Decoder Block 3: 64 -> 3 (is_last=True)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - --- Xây dựng Hyper Encoder ---
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperEncoder Block 0: 192 -> 192 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperEncoder Block 1: 192 -> 192 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperEncoder Block 2: 192 -> 192 (is_last=True)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - --- Xây dựng Hyper Decoder ---
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperDecoder Block 0: 192 -> 192 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperDecoder Block 1: 192 -> 192 (is_last=False)
+2025-05-09 22:18:01 - CompressorLogger - INFO     - HyperDecoder Block 2: 192 -> 384 (is_last=True)
+2025-05-09 22:18:03 - CompressorLogger - INFO     - --- Bắt đầu Forward ---
+2025-05-09 22:18:03 - CompressorLogger - CRITICAL - input image shape: torch.Size([1, 3, 1200, 600])
+2025-05-09 22:18:03 - CompressorLogger - INFO     - --- Bắt đầu Encode ---
+2025-05-09 22:18:03 - CompressorLogger - INFO     - Chạy qua Encoder chính...
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Latent shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Chạy qua Hyper Encoder...
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperEncoder block 0 output shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperEncoder block 1 output shape: torch.Size([1, 192, 38, 19])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperEncoder block 2 output shape: torch.Size([1, 192, 19, 10])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Hyper latent shape: torch.Size([1, 192, 19, 10])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Quantized Hyper latent shape: torch.Size([1, 192, 19, 10])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Chạy qua Hyper Decoder...
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperDecoder block 0 output shape: torch.Size([1, 192, 38, 19])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperDecoder block 1 output shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - HyperDecoder block 2 output shape: torch.Size([1, 384, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Hyper Decoder output shape: torch.Size([1, 384, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Latent distribution params shapes: mean=torch.Size([1, 192, 75, 38]), scale=torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Quantized Latent shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Kết thúc Encode ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Bắt đầu tính BPP ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Input shape for BPP: B=1, H=1200, W=600
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Latent shape: torch.Size([1, 192, 75, 38]), Hyper latent shape: torch.Size([1, 192, 19, 10])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - BPP calculation in training mode (using noise quantization)
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Hyper rate shape: torch.Size([1, 192, 19, 10]), Cond rate shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Total bits per image shape: [2153150.]
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Calculated BPP shape: torch.Size([1])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Kết thúc tính BPP ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Bắt đầu Decode ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Decoder input shape: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Decoder block 0 final output shape: torch.Size([1, 192, 150, 75])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Decoder block 1 final output shape: torch.Size([1, 128, 300, 150])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Decoder block 2 final output shape: torch.Size([1, 64, 600, 300])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - Decoder block 3 final output shape: torch.Size([1, 3, 1200, 600])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Kết thúc Decode ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - --- Kết thúc Forward ---
+2025-05-09 22:18:06 - CompressorLogger - INFO     - output: 4
+2025-05-09 22:18:06 - CompressorLogger - INFO     - bpp: torch.Size([1])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - q_latent: torch.Size([1, 192, 75, 38])
+2025-05-09 22:18:06 - CompressorLogger - INFO     - q_hyper_latent: torch.Size([1, 192, 19, 10])
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output shape: torch.Size([1, 3, 1200, 600])
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output dtype: torch.float32
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output device: cpu
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output shape: torch.Size([1, 64, 600, 300])
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output dtype: torch.float32
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output device: cpu
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output shape: torch.Size([1, 128, 300, 150])
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output dtype: torch.float32
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output device: cpu
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output shape: torch.Size([1, 192, 150, 75])
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output dtype: torch.float32
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Output device: cpu
+2025-05-09 22:18:06 - CompressorLogger - CRITICAL - Input size: 8.23974609 MB
+2025-05-09 22:18:06 - CompressorLogger - ERROR    - Error during testing: 'list' object has no attribute 'element_size'
