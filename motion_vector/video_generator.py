@@ -64,13 +64,13 @@ class LosslessVideoGenerator:
 
             video_writer.write(frame)
 
-        # Release the video writer
+        # Release the video write1r
         video_writer.release()
         print(f"Lossless video saved to: {self.output_path}")
 
 if __name__ == "__main__":
     # Example usage
-    frame_folder = "D:\\videos\\VisDrone2019-VID-val\\sequences\\uav0000137_00458_v"
-    output_path = "D:\\videos\\video.avi"
+    frame_folder = "D:\\videos\\VisDrone2019-VID-val\\sequences\\uav0000339_00001_v"
+    output_path = "D:\\videos\\video2.avi"
     video_generator = LosslessVideoGenerator(frame_folder, output_path)
     video_generator.generate_video(True, 15)

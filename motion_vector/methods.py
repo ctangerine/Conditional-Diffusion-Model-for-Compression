@@ -132,36 +132,8 @@ def get_frames_and_diff_scores(frames: np.ndarray,
 # if __name__ == "__main__":
 # 	VIDEO_PATH = "D:\\videos\\video.avi"
 
-# 	# Read video
-# 	cap = cv2.VideoCapture(VIDEO_PATH)
-# 	if not cap.isOpened():
-# 		raise IOError(f"Cannot open video file: {VIDEO_PATH}")
-
-# 	frames = []
-# 	total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-# 	with tqdm(total=total_frames, desc="Reading frames") as pbar:
-# 		while True:
-# 			ret, frame = cap.read()
-# 			if not ret:
-# 				break
-# 			frames.append(frame)
-# 			pbar.update(1)
-# 	cap.release()
-# 	frames = np.array(frames)
-# 	print(f"Total frames: {len(frames)}")
-# 	# Get redundant frames
-# 	redundant_indices, diff_score = get_redundant_frame_indices(frames, color_space='YUV', k=1.0, min_spacing=5)
-# 	print(f"Redundant frames: {redundant_indices}")
-
-# 	# Plot diff scores
-# 	plt.plot(diff_score)
-# 	plt.title("Difference Scores")
-# 	plt.xlabel("Frame Index")
-# 	plt.ylabel("Difference Score")
-# 	plt.show()
-
 if __name__ == "__main__":
-	VIDEO_PATH = "D:\\videos\\video.avi"
+	VIDEO_PATH = "D:\\videos\\video2.avi"
 
 	# Read video
 	cap = cv2.VideoCapture(VIDEO_PATH)
@@ -180,4 +152,6 @@ if __name__ == "__main__":
 	cap.release()
 	frames = np.array(frames)
 
-	redundants, diff_scores = get_frames_and_diff_scores(frames, color_space='YUV', k=1.0, min_spacing=5, output_path='diff_visualization.mp4', fps=15)
+	redundants, diff_scores = get_redundant_frame_indices(frames, color_space='YUV', k=1.0, min_spacing=1)
+	print(f"Redundant frames: {redundants}")
+	print(f"Diff scores: {diff_scores}")
