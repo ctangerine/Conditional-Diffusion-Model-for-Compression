@@ -167,7 +167,7 @@ class HyperPrior(nn.Module):
         for i in range(self.num_chained_layers - 1):
             # Kích thước của 'a' khớp với output của lớp affine thứ i
             out_dim = self.transform_dims_full[i + 1]
-            param = nn.Parameter(torch.zeros(self.in_channels, 1, 1, 1, out_dim))
+            param = nn.Parameter(torch.zeros(self.in_channels, 1, 1, 1, out_dim)) 
             a_params.append(param)
         # Lưu vào ParameterList
         self.nonlinear_factors = nn.ParameterList(a_params)
