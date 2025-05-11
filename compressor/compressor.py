@@ -17,7 +17,7 @@ from network_components.resize_input import DownSampling, UpSampling
 from network_components.resnet_block import ResnetBlock
 from network_components.variable_bitrate_condition import VariableBitrateCondition
 
-logger = setup_logger(name='CompressorLogger', log_file='compressor.log', level=logging.DEBUG)
+logger = setup_logger(name='CompressorLogger', log_file='compressor.log', level=logging.WARNING)
 
 class Compressor(nn.Module):
     """
@@ -236,8 +236,8 @@ class Compressor(nn.Module):
 
         Returns:
             tuple: Chứa:
-                - q_latent (Tensor): Biểu diễn ẩn chính đã lượng tử hóa.
-                - q_hyper_latent (Tensor): Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
+                - quantize_latent (Tensor): Biểu diễn ẩn chính đã lượng tử hóa.
+                - quantize_hyper_latent (Tensor): Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
                 - state4bpp (dict): Dictionary chứa các tensor trung gian cần thiết để tính toán BPP (latent, hyper_latent, latent_distribution).
         """
         logger.info("--- Bắt đầu Encode ---")
@@ -292,13 +292,13 @@ class Compressor(nn.Module):
         # 3. Lượng tử hóa Hyper-Latent (sử dụng trong Hyper Decoder và tính BPP)
         # Sử dụng chế độ 'dequantize' (làm tròn) và median từ prior
         # Trong quá trình huấn luyện, hàm bpp sẽ lượng tử hóa lại với 'noise'
-        q_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
-        logger.info(f"Quantized Hyper latent shape: {q_hyper_latent.shape}")
+        quantize_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
+        logger.info(f"Quantized Hyper latent shape: {quantize_hyper_latent.shape}")
 
 
         # 4. Mạng giải mã siêu tiên nghiệm (Hyper Decoder)
         logger.info("Chạy qua Hyper Decoder...")
-        hyper_decoder_input = q_hyper_latent # Đầu vào là hyper-latent đã lượng tử hóa
+        hyper_decoder_input = quantize_hyper_latent # Đầu vào là hyper-latent đã lượng tử hóa
         # self.hyper_dec là ModuleList của các ModuleList con [ConvT/Conv, VBR/Identity, Act/Identity]
         num_hyper_dec_layers = len(self.hyper_decoder)
         for i, hyper_dec_block in enumerate(self.hyper_decoder):
@@ -333,8 +333,8 @@ class Compressor(nn.Module):
         latent_distribution = NormalDistribution(mean, scale)
 
         # Lượng tử hóa latent chính (sử dụng mean của phân phối làm tâm)
-        q_latent = quantize(latent, "dequantize", latent_distribution.mean)
-        logger.info(f"Quantized Latent shape: {q_latent.shape}")
+        quantize_latent = quantize(latent, "dequantize", latent_distribution.mean)
+        logger.info(f"Quantized Latent shape: {quantize_latent.shape}")
 
 
         # 6. Chuẩn bị đầu ra
@@ -345,10 +345,10 @@ class Compressor(nn.Module):
             "latent_distribution": latent_distribution, # Đối tượng phân phối của latent
         }
         logger.info("--- Kết thúc Encode ---")
-        return q_latent, q_hyper_latent, state4bpp
+        return quantize_latent, quantize_hyper_latent, state4bpp
 
 
-    def decode(self, q_latent, bitrate_condition=None):
+    def decode(self, quantize_latent, bitrate_condition=None):
         """
         Thực hiện quá trình giải mã từ biểu diễn ẩn chính đã lượng tử hóa.
 
@@ -358,7 +358,7 @@ class Compressor(nn.Module):
         chúng được xây dựng trong `build_network`.
 
         Args:
-            q_latent (Tensor): Biểu diễn ẩn chính đã lượng tử hóa (đầu ra từ encode).
+            quantize_latent (Tensor): Biểu diễn ẩn chính đã lượng tử hóa (đầu ra từ encode).
             bitrate_condition (Tensor, optional): Embedding điều kiện bitrate (nếu có).
 
         Returns:
@@ -367,7 +367,7 @@ class Compressor(nn.Module):
         """
         logger.info("--- Bắt đầu Decode ---")
         intermediate_outputs = []
-        current_features = q_latent # Bắt đầu với latent đã lượng tử hóa
+        current_features = quantize_latent # Bắt đầu với latent đã lượng tử hóa
         logger.info(f"Decoder input shape: {current_features.shape}")
 
         # self.dec là ModuleList của các ModuleList con [Upsample, ResnetBlock, VBR/Identity]
@@ -420,21 +420,21 @@ class Compressor(nn.Module):
         # Lượng tử hóa lại (khác nhau giữa training và evaluation)
         if self.training:
             # Khi training, thêm nhiễu lượng tử hóa để huấn luyện mô hình entropy
-            q_hyper_latent = quantize(hyper_latent, "noise")
-            q_latent = quantize(latent, "noise")
+            quantize_hyper_latent = quantize(hyper_latent, "noise")
+            quantize_latent = quantize(latent, "noise")
             logger.info("BPP calculation in training mode (using noise quantization)")
         else:
             # Khi evaluation, sử dụng làm tròn (dequantize) giống như trong encode
-            q_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
-            q_latent = quantize(latent, "dequantize", latent_distribution.mean)
+            quantize_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
+            quantize_latent = quantize(latent, "dequantize", latent_distribution.mean)
             logger.info("BPP calculation in eval mode (using dequantize)")
 
         # Tính rate (số bit) từ likelihood
         # Rate = -log2(Likelihood)
-        # Sử dụng likelihood từ HyperPrior cho q_hyper_latent
-        hyper_rate = -self.hyper_prior.likelihood(q_hyper_latent).log2()
-        # Sử dụng likelihood từ NormalDistribution (tham số hóa bởi hyper-decoder) cho q_latent
-        cond_rate = -latent_distribution.likelihood(q_latent).log2()
+        # Sử dụng likelihood từ HyperPrior cho quantize_hyper_latent
+        hyper_rate = -self.hyper_prior.likelihood(quantize_hyper_latent).log2()
+        # Sử dụng likelihood từ NormalDistribution (tham số hóa bởi hyper-decoder) cho quantize_latent
+        cond_rate = -latent_distribution.likelihood(quantize_latent).log2()
         logger.info(f"Hyper rate shape: {hyper_rate.shape}, Cond rate shape: {cond_rate.shape}")
 
 
@@ -447,6 +447,9 @@ class Compressor(nn.Module):
         logger.info(f"Calculated BPP shape: {bpp_estimate.shape}")
         logger.info("--- Kết thúc tính BPP ---")
         return bpp_estimate
+
+
+    # def entropy_encoding(self, quantize_latent, quantize_hyper_latent):
 
 
     def forward(self, input_image, bitrate_condition=None):
@@ -467,36 +470,34 @@ class Compressor(nn.Module):
             dict: Dictionary chứa các kết quả:
                 - "output": Kết quả từ decoder (list các tensor theo logic gốc).
                 - "bpp": Giá trị BPP ước lượng.
-                - "q_latent": Biểu diễn ẩn chính đã lượng tử hóa.
-                - "q_hyper_latent": Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
+                - "quantize_latent": Biểu diễn ẩn chính đã lượng tử hóa.
+                - "quantize_hyper_latent": Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
         """
         logger.info("--- Bắt đầu Forward ---")
         # 1. Mã hóa
         logger.critical(f"input image shape: {input_image.shape}")
-        q_latent, q_hyper_latent, state4bpp = self.encode(input_image, bitrate_condition)
+        quantize_latent, quantize_hyper_latent, state4bpp = self.encode(input_image, bitrate_condition)
 
         # 2. Tính BPP
         bpp_estimate = self.bpp(input_image.shape, state4bpp)
 
         # 3. Giải mã
         # Đầu vào của decode là latent đã lượng tử hóa
-        decoded_output = self.decode(q_latent, bitrate_condition)
+        decoded_output = self.decode(quantize_latent, bitrate_condition)
 
         logger.info("--- Kết thúc Forward ---")
         # 4. Trả về kết quả
         return {
             "output": decoded_output,      # Kết quả từ decoder
             "bpp": bpp_estimate,           # Giá trị BPP
-            "q_latent": q_latent,          # Latent lượng tử hóa
-            "q_hyper_latent": q_hyper_latent, # Hyper-latent lượng tử hóa
+            "quantize_latent": quantize_latent,          # Latent lượng tử hóa
+            "quantize_hyper_latent": quantize_hyper_latent, # Hyper-latent lượng tử hóa
             # Bạn có thể thêm các giá trị khác vào đây nếu cần, ví dụ:
             # "state4bpp": state4bpp # Nếu cần truy cập bên ngoài
         }
 
-        
-
     def prior_probability_loss(self):
-        return self.hyper_prior.get_extraloss()
+        return self.hyper_prior.prior_probability_loss()
 
         
 # Testing the Compressor class
@@ -505,66 +506,22 @@ compressor = Compressor(
     out_channel=3,
     base_channel=64,
     channel_multiplier=[1, 2, 3, 3],
-    hyperprior_channel_multiplier=[3, 3, 3]
+    hyperprior_channel_multiplier=[3, 3, 3],
+    bitrate_conditional=True, 
 )
 
-try:
-    image = 'dogpicture.png'
-    # Load the image and convert it to a tensor
-    from PIL import Image
-    import torchvision.transforms as transforms
+# from PIL import Image
+# import torchvision.transforms as transforms
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Resize((1200, 600)),  # Resize to (256, 256) for testing
-    ])
+# img_path = "dogpicture.png"
+# image = Image.open(img_path).convert("RGB")
+# transform = transforms.Compose([
+#     transforms.Resize((128, 128)),  # Resize để xử lý nhanh
+#     transforms.ToTensor(),          # Chuyển sang tensor
+# ])
+# img_tensor = transform(image).unsqueeze(0)
 
-    img = Image.open(image).convert('RGB')
-    img_tensor = transform(img).unsqueeze(0)  # Add batch dimension (N, C, H, W)
+# print("img_tensor type:", type(img_tensor))
 
-    dump_tensor = img_tensor
-    output = compressor(dump_tensor, bitrate_condition=None)
-    for key, value in output.items():
-        logger.info(f"{key}: {value.shape if isinstance(value, torch.Tensor) else len(value)}")
-
-    for thing in output['output']:
-        logger.critical(f"Output shape: {thing.shape}")
-        logger.critical(f"Output dtype: {thing.dtype}")
-        logger.critical(f"Output device: {thing.device}")
-        # Draw thing
-        if thing.shape == (1, 3, 1200, 608):
-            thing = thing.cpu().detach().numpy()
-            thing = thing.squeeze(0).transpose(2, 1, 0)  # Convert to (H, W, C) format
-            thing = (thing * 255).astype(np.uint8)  # Convert to uint8 for image display
-
-            thing = Image.fromarray(thing)
-            thing.show()
-
-
-
-    def tensor_size_in_MB(tensor):
-        """Tính kích thước của tensor (theo MB)"""
-        if tensor is None:
-            return 0
-        return tensor.element_size() * tensor.nelement() / (1024 * 1024)
-
-    # Log size of output in MB
-    logger.critical(f"Input size: {tensor_size_in_MB(dump_tensor):.8f} MB")
-    logger.critical(f"Output size: {tensor_size_in_MB(output['output']):.8f} MB")
-    logger.critical(f"q_latent size: {tensor_size_in_MB(output['q_latent']):.8f} MB")
-    logger.critical(f"q_hyper_latent size: {tensor_size_in_MB(output['q_hyper_latent']):.8f} MB")
-
-    # bpp thường là scalar hoặc float, nên không phải tensor — xử lý riêng nếu cần
-    bpp_size = sys.getsizeof(output['bpp']) / (1024 * 1024)
-    logger.critical(f"bpp size (approx): {bpp_size:.8f} MB")
-
-    # Tính tỷ lệ nén
-    input_size = tensor_size_in_MB(dump_tensor)
-    output_size = tensor_size_in_MB(output['output'])
-    ratio = output_size / input_size if input_size > 0 else 0
-    logger.critical(f"Compression ratio (output/input): {ratio:.8f}")
-
-    logger.critical("Testing completed successfully.")
-except Exception as e:
-    logger.error(f"Error during testing: {e}")
-    raise e
+# output = compressor(img_tensor, bitrate_condition=True)
+# print("Output shape:", output["output"][0].shape)  # Kiểm tra kích thước đầu ra
