@@ -26,3 +26,5 @@ dist/
 # Thư mục chứa các tệp Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 test.ipynb
+compressor.log
+unet_module.log
