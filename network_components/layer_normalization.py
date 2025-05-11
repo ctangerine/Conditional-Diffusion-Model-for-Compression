@@ -26,3 +26,12 @@ class LayerNorm(nn.Module):
         mean = torch.mean(input, dim=1, keepdim=True)
         return self.gamma * (input - mean) / torch.sqrt(var + self.eps) + self.beta
         
+
+class BaseLayerNorm(nn.Module):
+    def __init__(self, functional, dimension):
+        super().__init__()
+        self.functional = functional
+        self.norm = LayerNorm(dimension, eps=1e-5)
+    def forward(self, input):
+        input = self.norm(input)
+        return self.functional(input)

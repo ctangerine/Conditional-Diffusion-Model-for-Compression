@@ -396,3 +396,12 @@ class NormalDistribution:
         # Tính likelihood và áp dụng cận dưới
         likelihood_val = upper_cdf - lower_cdf
         return LowerBound.apply(likelihood_val, min_likelihood)
+    
+
+def check_valid(tensor):
+    # Check if the tensor is valid (not NaN or Inf and not empty)
+    if tensor is None or tensor.numel() == 0:
+        return False
+    if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+        return False
+    return True

@@ -15,4 +15,5 @@ class UpSampling(nn.Module):
         self.conv_layer = nn.ConvTranspose2d(in_channels=in_channel, out_channels=out_channel, kernel_size=4, stride=2, padding=1)
 
     def forward(self, input):
-        return self.conv_layer(input)
+        output = self.conv_layer(input)
+        return output
