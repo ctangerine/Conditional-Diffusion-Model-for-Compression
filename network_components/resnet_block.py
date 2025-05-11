@@ -21,6 +21,8 @@ class ResnetBlock(nn.Module):
     def __init__(self, in_channel, out_channel, large_kernel=False, time_embedding=False, time_embedding_channels=None):
         super().__init__()
         self.kernel_size = 5 if large_kernel else 3
+        # Set device based on CUDA availability
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         if time_embedding is not False:
             self.mlp = nn.Sequential(
@@ -28,8 +30,7 @@ class ResnetBlock(nn.Module):
             )
         else:
             self.mlp = None
-
-        print(f"ResnetBlock: in_channel: {in_channel}, out_channel: {out_channel}, kernel_size: {self.kernel_size}, time_embedding: {time_embedding}")
+        
         self.resnes_block = nn.Sequential(
             nn.Conv2d(in_channels=in_channel, out_channels=out_channel, kernel_size=self.kernel_size, padding=self.kernel_size//2),
             LayerNorm(out_channel),
@@ -43,8 +44,17 @@ class ResnetBlock(nn.Module):
             self.shortcut = nn.Conv2d(in_channels=in_channel, out_channels=out_channel, kernel_size=1)
         else:
             self.shortcut = nn.Identity()
+            
+        # Move model components to device
+        self.to(self.device)
 
     def forward(self, input, time_tensor=None): 
+        # Move input to the same device as the model
+        input = input.to(self.device)
+        
+        if time_tensor is not None:
+            time_tensor = time_tensor.to(self.device)
+            
         self.time_tensor = time_tensor if time_tensor is not None else None
 
         conv = None
@@ -62,9 +72,15 @@ class ResnetBlock(nn.Module):
 class BaseResidualBlock(nn.Module):
     def __init__(self, functional):
         super(BaseResidualBlock, self).__init__()
+        # Set device based on CUDA availability
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.functional = functional
         self.layer_norm = LayerNorm(functional.in_channels)
+        
+        # Move model components to device
+        self.to(self.device)
 
     def forward(self, x):
+        # Move input to the same device as the model
+        x = x.to(self.device)
         return x + self.functional(x)
-    
