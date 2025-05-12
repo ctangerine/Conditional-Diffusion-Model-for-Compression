@@ -31,7 +31,7 @@ class ResnetBlock(nn.Module):
         else:
             self.mlp = None
         
-        self.resnes_block = nn.Sequential(
+        self.resnet_block = nn.Sequential(
             nn.Conv2d(in_channels=in_channel, out_channels=out_channel, kernel_size=self.kernel_size, padding=self.kernel_size//2),
             LayerNorm(out_channel),
             nn.ReLU(),
@@ -58,12 +58,12 @@ class ResnetBlock(nn.Module):
         self.time_tensor = time_tensor if time_tensor is not None else None
 
         conv = None
-        for module in self.resnes_block:
+        for module in self.resnet_block:
             conv = module(input) if conv is None else module(conv)
 
         if self.mlp is not None:
-            time_emb = self.mlp(self.time_tensor)
-            conv = conv + time_emb[:, :, None, None]
+            time_emb = self.mlp(time_tensor.clone())
+            conv = conv + time_emb.view(time_emb.shape[0], time_emb.shape[1], 1, 1)
 
         shortcut = self.shortcut(input)
         return conv + shortcut
