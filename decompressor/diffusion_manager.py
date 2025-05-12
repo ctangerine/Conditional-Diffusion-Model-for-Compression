@@ -24,38 +24,51 @@ class DiffusionManager(nn.Module):
         bpp_loss_weight=0.2,
         lpips_loss_weight=0.2,
         mse_loss_weight=0.6,
+        device=None
     ):
         super(DiffusionManager, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.train = True
+        # Set device based on provided parameter or availability
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"DiffusionManager initialized on device: {self.device}")
+        
+        self.train_status = True
+        
+        # Initialize encoder and U-Net
         self.encoder = encoder
         self.u_net = u_net
+        
+        # Ensure model components are on the correct device
+        if isinstance(self.encoder, nn.Module):
+            self.encoder.to(self.device)
+        if isinstance(self.u_net, nn.Module):
+            self.u_net.to(self.device)
+        
         self.num_timesteps = num_timesteps
 
+        # Generate schedules
         self.betas_schedule = self.cosine_beta_schedule(num_timesteps)
         self.alphas_schedule = self.alpha_schedule(self.betas_schedule)
-        self.alphas_cumprod = torch.tensor(np.cumprod(self.alphas_schedule, axis=0), dtype=torch.float32)
+        self.alphas_cumprod = torch.tensor(np.cumprod(self.alphas_schedule, axis=0), 
+                                          dtype=torch.float32, device=self.device)
 
-        # ac = alpha_cumprod
-        # inv_ac = 1/ac
-        # omac = 1 minus ac
-        # m1 = minus 1
+        # Pre-compute values for efficiency
         self.sqrt_ac = torch.sqrt(self.alphas_cumprod)
         self.inv_ac = 1 / self.alphas_cumprod
         self.sqrt_omac = torch.sqrt(1 - self.alphas_cumprod)
         self.sqrt_inv_ac = torch.sqrt(self.inv_ac)
-        self.sqrt_inv_ac_m1  = torch.sqrt(self.inv_ac - 1)
+        self.sqrt_inv_ac_m1 = torch.sqrt(self.inv_ac - 1)
 
+        # Initialize LPIPS loss and move to device
+        self.lpips_loss = lpips.LPIPS(net='alex', verbose=False, eval_mode=False if self.train_status else True)
+        self.lpips_loss.to(self.device)
 
-        self.lpips_loss = lpips.LPIPS(net='alex', verbose=False, eval_mode=False if self.train == True else True)
-
+        # Loss weights
         self.bpp_loss_weight = bpp_loss_weight
         self.lpips_loss_weight = lpips_loss_weight
         self.mse_loss_weight = mse_loss_weight
-        # self.register_buffer("betas", torch.tensor(self.betas_schedule, dtype=torch.float32))
-        # self.register_buffer("alphas", torch.tensor(self.alphas_schedule, dtype=torch.float32))
-        # self.register_buffer("alphas_cumprod", torch.tensor(self.alphas_cumpod, dtype=torch.float32))
-
+        
+        # Move all parameters to specified device
+        self.to(self.device)
 
     def cosine_beta_schedule(self, timesteps, s=0.08):
         """
@@ -89,9 +102,15 @@ class DiffusionManager(nn.Module):
         return alpha_schedule
     
     def create_noise(self, input_start, step_t, noise=None):
-        # Create nosie by formulas: x_t = sqrt(alpha_cumprod) * x_0 + sqrt(1 - alpha_cumprod) * noise
+        # Move input to device
+        input_start = input_start.to(self.device)
+        step_t = step_t.to(self.device)
+        
+        # Create noise by formulas: x_t = sqrt(alpha_cumprod) * x_0 + sqrt(1 - alpha_cumprod) * noise
         if noise is None:
-            noise = torch.randn_like(input_start)
+            noise = torch.randn_like(input_start, device=self.device)
+        else:
+            noise = noise.to(self.device)
 
         # Tạo nhiễu theo công thức: x_t = sqrt(alpha_cumprod) * x_0 + sqrt(1 - alpha_cumprod) * noise
         sqrt_ac = self.sqrt_ac[step_t].view(-1, 1, 1, 1)
@@ -101,97 +120,119 @@ class DiffusionManager(nn.Module):
         return x_t
     
     def denoise_to_x0(self, input_step_t, step_t, estimate_noise):
+        # Move inputs to device
+        input_step_t = input_step_t.to(self.device)
+        step_t = step_t.to(self.device)
+        estimate_noise = estimate_noise.to(self.device)
+        
         sqrt_inv_ac = self.sqrt_inv_ac[step_t].view(-1, 1, 1, 1)
 
         estimate_x0 = sqrt_inv_ac * (input_step_t - self.sqrt_omac[step_t].view(-1, 1, 1, 1) * estimate_noise)
         return estimate_x0
     
     def loss_fn(self, input_step_t, step_t, estimate_noise):
+        # Move inputs to device
+        input_step_t = input_step_t.to(self.device)
+        step_t = step_t.to(self.device)
+        estimate_noise = estimate_noise.to(self.device)
+        
         # Tính toán loss theo công thức: L = ||x_0 - x_0_hat||^2
         # Trong đó x_0_hat = x_t - sqrt(1 - alpha_cumprod) * noise
-        # loss = ||x_0 - x_0_hat||^2
         estimate_x0 = self.denoise_to_x0(input_step_t, step_t, estimate_noise)
         loss = F.mse_loss(estimate_x0, input_step_t)
 
-        # # Draw estimate x0
-        # estimate_x0 = estimate_x0.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-        # estimate_x0 = (estimate_x0 * 0.5 + 0.5).clip(0, 1)  # Chuyển về [0, 1]
-        # plt.imshow(estimate_x0)
-        # plt.title("Estimate x0")
-        # plt.axis("off")
-        # plt.show()
         return loss
     
     def forward(self, input_tensor):
+
+        # Print size of input tensor in mb
+        input_tensor_size_mb = input_tensor.numel() * input_tensor.element_size() / (1024 ** 2)
+        print(f"Input tensor size: {input_tensor_size_mb:.2f} MB")
+
+        # Move input to device
+        input_tensor = input_tensor.to(self.device)
+        
         batch_size = input_tensor.size(0)
 
-        bitrate_scalar_batch = torch.rand(batch_size, device=input_tensor.device)
+        # Generate random bitrate conditioning
+        bitrate_scalar_batch = torch.full((batch_size,), torch.rand(1).item(), device=self.device)
 
+        # Run encoder
         encoder_output = self.encoder(input_tensor, bitrate_condition=bitrate_scalar_batch)
 
         context, bpp, _, _ = encoder_output["output"], encoder_output["bpp"], encoder_output["quantize_latent"], encoder_output["quantize_hyper_latent"]
 
-        # Tạo nhiễu ngẫu nhiên
-        timesteps_tensor = torch.randint(0, self.num_timesteps, (batch_size,), device=input_tensor.device).long()
+        # Generate random timesteps
+        timesteps_tensor = torch.randint(0, self.num_timesteps, (batch_size,), device=self.device).long()
 
+        # Create noisy input
         noise_input_tensor = self.create_noise(input_tensor, timesteps_tensor)
 
-        timesteps_tensor = timesteps_tensor.float()
+        # Convert to float for U-Net
+        timesteps_tensor_float = timesteps_tensor.float()
 
-        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor, context)
+        # Run U-Net to predict noise
+        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor_float, context)
 
+        # Convert back to long for loss calculation
         timesteps_tensor = timesteps_tensor.long()
 
+        # Calculate losses
         mse_loss = self.loss_fn(noise_input_tensor, timesteps_tensor, predicted_noise)
         lpips_loss = self.lpips_loss(input_tensor, predicted_noise).mean()
         bpp_loss = bpp.mean()
 
+        # Dynamic bitrate weight
         self.bpp_loss_weight = 2 ** (3 * bitrate_scalar_batch) * 5e-4
+        self.bpp_loss_weight = self.bpp_loss_weight.mean()
 
-        # Tính toán tổng hợp các loss
+        # Calculate total loss
         total_loss = (
             self.mse_loss_weight * mse_loss +
             self.lpips_loss_weight * lpips_loss +
             self.bpp_loss_weight * bpp_loss
         )
 
+        # Calculate prior probability loss
         prior_probability_loss = self.encoder.prior_probability_loss()
 
         return total_loss, prior_probability_loss
-    
+       
 
-import matplotlib.pyplot as plt
-from PIL import Image
-from torchvision import transforms
+# import matplotlib.pyplot as plt
+# from PIL import Image
+# from torchvision import transforms
 
-# Khởi tạo diffusion manager
-compressor = Compressor(
-    in_channel=3,
-    out_channel=3,
-    base_channel=64,
-    bitrate_conditional=True,
-)
+# # Khởi tạo diffusion manager
+# compressor = Compressor(
+#     in_channel=3,
+#     out_channel=3,
+#     base_channel=64,
+#     bitrate_conditional=True,
+# )
 
-unet_module = UnetModule()
+# unet_module = UnetModule()
 
-diffusion = DiffusionManager(
-    encoder=compressor,
-    u_net=unet_module,
-)
+# diffusion = DiffusionManager(
+#     encoder=compressor,
+#     u_net=unet_module,
+# )
 
-# Load ảnh
-img_path = "dogpicture.png"
-image = Image.open(img_path).convert("RGB")
-transform = transforms.Compose([
-    transforms.Resize((128, 128)),  # Resize để xử lý nhanh
-    transforms.ToTensor(),          # Chuyển sang tensor
-])
-img_tensor = transform(image).unsqueeze(0)  # Thêm batch dimension (1, 3, H, W)
+# torch.cuda.empty_cache()
 
-output = diffusion(img_tensor)
+# # Load ảnh
+# img_path = "dogpicture.png"
+# image = Image.open(img_path).convert("RGB")
+# transform = transforms.Compose([
+#     transforms.Resize((128, 128)),  # Resize để xử lý nhanh
+#     transforms.ToTensor(),          # Chuyển sang tensor
+# ])
+# img_tensor = transform(image).unsqueeze(0)  # Thêm batch dimension (1, 3, H, W)
 
-print("Output 0:", output[0])  # In ra đầu ra
-print("Output 1:", output[1])  # In ra đầu ra
+# output = diffusion(img_tensor)
+
+# print("Output 0:", output[0])  # In ra đầu ra
+# print("Output 1:", output[1])  # In ra đầu ra
 
 
 # # Tạo nhiễu ngẫu nhiên và hiển thị ảnh với nhiễu

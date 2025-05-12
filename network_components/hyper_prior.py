@@ -40,13 +40,16 @@ class PriorFunction(nn.Module):
 
     __constants__ = ['bias', 'in_features', 'out_channels']
 
-    def __init__(self, parallel_dims, in_features, out_features, scale, bias=True):
+    def __init__(self, parallel_dims, in_features, out_features, scale, bias=True, device=None):
         super(PriorFunction, self).__init__()
         self.parallel_dims = parallel_dims
         self.in_features = in_features
         self.out_features = out_features
         self.scale = scale
         self.bias = bias
+        
+        # Set device
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         if bias:
             self.bias = nn.Parameter(torch.Tensor(parallel_dims, 1, 1, 1, out_features))
@@ -56,6 +59,9 @@ class PriorFunction(nn.Module):
         self.weight = nn.Parameter(torch.Tensor(parallel_dims, 1, 1, in_features, out_features))
 
         self.reset_parameters(scale)
+        
+        # Move parameters to device
+        self.to(self.device)
 
     def reset_parameters(self, scale):
         nn.init.constant_(self.weight, scale)
@@ -67,6 +73,10 @@ class PriorFunction(nn.Module):
         # input shape expected: (parallel_dims, batch_size, ..., in_features)
         # weight shape:        (parallel_dims, 1, 1, in_features, out_features)
         # bias shape:          (parallel_dims, 1, 1, 1, out_features)
+        
+        # Move input to device
+        input = input.to(self.device)
+        
         weight_transformed = F.softplus(self.weight)
 
         if detach:
@@ -97,8 +107,9 @@ class HyperPrior(nn.Module):
         transform_dims (list[int]): Danh sách các kích thước đặc trưng trung gian
                                     cho chuỗi các phép biến đổi bên trong (ví dụ: [3, 3, 3]).
         init_scale (float): Hệ số scale ban đầu dùng để khởi tạo tham số (ví dụ: 10.0).
+        device (torch.device): Thiết bị để đặt mô hình (mặc định: None, sẽ sử dụng CUDA nếu có).
     """
-    def __init__(self, in_channels=256, transform_dims=[3, 3, 3], init_scale=10.0):
+    def __init__(self, in_channels=256, transform_dims=[3, 3, 3], init_scale=10.0, device=None):
         """
         Hàm khởi tạo của lớp HyperPrior.
 
@@ -128,6 +139,10 @@ class HyperPrior(nn.Module):
            - Khởi tạo bằng 0. Shape: (1, in_channels, 1, 1).
         """
         super(HyperPrior, self).__init__()
+        
+        # Set device based on availability or user preference
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Initializing HyperPrior on device: {self.device}")
 
         self.in_channels = in_channels
 
@@ -155,7 +170,8 @@ class HyperPrior(nn.Module):
                 in_features=current_in_features,
                 out_features=current_out_features,
                 scale=init_prior_scale,
-                bias=True # Luôn dùng bias theo bài báo
+                bias=True, # Luôn dùng bias theo bài báo
+                device=self.device
             )
             prior_functions.append(pf)
         # Lưu vào ModuleList
@@ -174,6 +190,9 @@ class HyperPrior(nn.Module):
 
         # Tham số trung vị học được
         self._medians = nn.Parameter(torch.zeros(1, self.in_channels, 1, 1))
+        
+        # Move entire model to the device
+        self.to(self.device)
 
     @property
     def medians(self):
@@ -203,6 +222,9 @@ class HyperPrior(nn.Module):
         Returns:
             Tensor: Giá trị CDF (hoặc logits) đã tính toán. Shape: (N, C, H, W).
         """
+        # Move input to device
+        x = x.to(self.device)
+        
         # 1. Chuẩn bị đầu vào:
         #    Đổi shape từ (N, C, H, W) -> (C, N, H, W, 1)
         #    - transpose(0, 1): Đưa chiều kênh (C) lên đầu để khớp parallel_dims.
@@ -255,6 +277,9 @@ class HyperPrior(nn.Module):
         Returns:
             Tensor: Giá trị PDF đã tính toán. Shape: (N, C, H, W).
         """
+        # Move input to device
+        x = x.to(self.device)
+        
         # Đảm bảo x yêu cầu gradient để có thể tính đạo hàm theo nó
         x = x.requires_grad_(True)
 
@@ -315,6 +340,9 @@ class HyperPrior(nn.Module):
         Returns:
             Tensor: Likelihood đã tính toán cho mỗi giá trị trong x. Shape: (N, C, H, W).
         """
+        # Move input to device
+        x = x.to(self.device)
+        
         # 1. Tính CDF logits tại các điểm biên của khoảng lượng tử hóa:
         lower_logit = self.cdf(x - 0.5, logits=True, detach=False) # logit(CDF(x - 0.5))
         upper_logit = self.cdf(x + 0.5, logits=True, detach=False) # logit(CDF(x + 0.5))
@@ -356,6 +384,9 @@ class HyperPrior(nn.Module):
         Returns:
             Tensor: Các giá trị 'z' tương ứng với xác suất 'xi'. Shape: (N, C, H, W).
         """
+        # Move input to device
+        xi = xi.to(self.device)
+        
         if method == 'bisection':
             # --- Hàm mục tiêu f(z) = CDF(z) - xi ---
             # Ta cần tìm z sao cho f(z) = 0.
@@ -367,7 +398,7 @@ class HyperPrior(nn.Module):
             # Cần đảm bảo f(left) < 0 và f(right) > 0.
             # Bắt đầu với một khoảng lớn và mở rộng nếu cần.
             # Sử dụng giá trị lớn hơn [-1, 1] để an toàn hơn.
-            init_interval = torch.tensor([-100.0, 100.0], device=xi.device)
+            init_interval = torch.tensor([-100.0, 100.0], device=self.device)
             left_endpoints = torch.full_like(xi, init_interval[0])
             right_endpoints = torch.full_like(xi, init_interval[1])
 
@@ -415,7 +446,7 @@ class HyperPrior(nn.Module):
         else:
             raise NotImplementedError(f"ICDF method '{method}' not implemented.")
 
-    def sample(self, shape, device):
+    def sample(self, shape, device=None):
         """
         Tạo mẫu ngẫu nhiên từ phân phối xác suất đã học được bởi HyperPrior.
 
@@ -427,10 +458,15 @@ class HyperPrior(nn.Module):
             shape (tuple): Kích thước (shape) mong muốn của tensor mẫu đầu ra
                            (ví dụ: (N, C, H, W)).
             device: Thiết bị (cpu hoặc cuda) để tạo tensor mẫu trên đó.
+                    Nếu None, sẽ sử dụng thiết bị của mô hình.
 
         Returns:
             Tensor: Các mẫu ngẫu nhiên được tạo ra. Shape giống như `shape` đầu vào.
         """
+        # Use model's device if none provided
+        if device is None:
+            device = self.device
+            
         # Tạo số ngẫu nhiên đều trong khoảng (eps, 1-eps) để tránh các giá trị
         # cực biên 0 và 1 có thể gây lỗi số học trong icdf.
         eps = 1e-6

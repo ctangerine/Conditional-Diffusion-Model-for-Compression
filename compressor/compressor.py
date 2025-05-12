@@ -29,6 +29,7 @@ class Compressor(nn.Module):
     - bitrate_conditional (bool): Whether to use bitrate conditional or not. Default is False.
     - channel_multiplier (list): List of multipliers for each layer. Default is [1, 2, 3, 4, 4], meaning the nummber of channel per layer will be increased by those multiplier.
     - hyperprior_channel_multiplier (list): List of multipliers for hyperprior channels. Default is [3, 3, 3], meaning the nummber of channel per layer will be increased by those multiplier.
+    - device (torch.device, optional): Device to use for computation. If None, will use CUDA if available, otherwise CPU.
     """
 
     """
@@ -49,9 +50,14 @@ class Compressor(nn.Module):
         base_channel=64, 
         bitrate_conditional=False, 
         channel_multiplier=[1, 2, 3, 4, 4], 
-        hyperprior_channel_multiplier= [3, 3, 3]
+        hyperprior_channel_multiplier= [3, 3, 3],
+        device=None
     ):
         super().__init__()
+        
+        # Set device based on availability or user preference
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Initializing Compressor on device: {self.device}")
 
         ## --- Lưu trữ các tham số cấu hình ---
         self.in_channel = in_channel
@@ -146,6 +152,10 @@ class Compressor(nn.Module):
 
         # Xây dựng mang
         self.build_network()
+        
+        # Move the entire model to the device
+        self.to(self.device)
+        logger.info(f"Model moved to device: {self.device}")
 
 
     def build_network(self):
@@ -241,6 +251,12 @@ class Compressor(nn.Module):
                 - state4bpp (dict): Dictionary chứa các tensor trung gian cần thiết để tính toán BPP (latent, hyper_latent, latent_distribution).
         """
         logger.info("--- Bắt đầu Encode ---")
+        
+        # Move input to device
+        input_image = input_image.to(self.device)
+        if bitrate_condition is not None:
+            bitrate_condition = bitrate_condition.to(self.device)
+            
         current_features = input_image
 
         # 1. Mạng mã hóa chính (Encoder)
@@ -366,6 +382,12 @@ class Compressor(nn.Module):
                           được đảo ngược thứ tự.
         """
         logger.info("--- Bắt đầu Decode ---")
+        
+        # Move inputs to device
+        quantize_latent = quantize_latent.to(self.device)
+        if bitrate_condition is not None:
+            bitrate_condition = bitrate_condition.to(self.device)
+            
         intermediate_outputs = []
         current_features = quantize_latent # Bắt đầu với latent đã lượng tử hóa
         logger.info(f"Decoder input shape: {current_features.shape}")
@@ -408,10 +430,13 @@ class Compressor(nn.Module):
             Tensor: Giá trị BPP ước lượng (thường là tensor 1 chiều, mỗi phần tử cho 1 ảnh trong batch).
         """
         logger.info("--- Bắt đầu tính BPP ---")
+        
+        # Ensure all tensors are on the correct device
         B, _, H, W = input_shape # Lấy kích thước ảnh gốc
+        
         # Lấy các tensor cần thiết từ state4bpp
-        latent = state4bpp["latent"]
-        hyper_latent = state4bpp["hyper_latent"]
+        latent = state4bpp["latent"].to(self.device)
+        hyper_latent = state4bpp["hyper_latent"].to(self.device)
         latent_distribution = state4bpp["latent_distribution"]
         logger.info(f"Input shape for BPP: B={B}, H={H}, W={W}")
         logger.info(f"Latent shape: {latent.shape}, Hyper latent shape: {hyper_latent.shape}")
@@ -474,6 +499,16 @@ class Compressor(nn.Module):
                 - "quantize_hyper_latent": Biểu diễn ẩn siêu tiên nghiệm đã lượng tử hóa.
         """
         logger.info("--- Bắt đầu Forward ---")
+        
+        # Move input to device
+        input_image = input_image.to(self.device)
+        if bitrate_condition is not None:
+            bitrate_condition = bitrate_condition.to(self.device)
+            
+        # Log device information
+        logger.info(f"Using device: {self.device}")
+        logger.info(f"Input tensor device: {input_image.device}")
+        
         # 1. Mã hóa
         logger.critical(f"input image shape: {input_image.shape}")
         quantize_latent, quantize_hyper_latent, state4bpp = self.encode(input_image, bitrate_condition)
@@ -499,16 +534,18 @@ class Compressor(nn.Module):
     def prior_probability_loss(self):
         return self.hyper_prior.prior_probability_loss()
 
+# Calculate size of model, input (64, 3, 256, 256)
+
         
-# Testing the Compressor class
-compressor = Compressor(
-    in_channel=3,
-    out_channel=3,
-    base_channel=64,
-    channel_multiplier=[1, 2, 3, 3],
-    hyperprior_channel_multiplier=[3, 3, 3],
-    bitrate_conditional=True, 
-)
+# # Testing the Compressor class
+# compressor = Compressor(
+#     in_channel=3,
+#     out_channel=3,
+#     base_channel=64,
+#     channel_multiplier=[1, 2, 3, 3],
+#     hyperprior_channel_multiplier=[3, 3, 3],
+#     bitrate_conditional=True, 
+# )
 
 # from PIL import Image
 # import torchvision.transforms as transforms

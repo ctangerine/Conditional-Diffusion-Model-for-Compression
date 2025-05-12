@@ -247,26 +247,26 @@ class UnetModule(nn.Module):
         return output
             
 
-# Test the UnetModule class
-if __name__ == "__main__":
-    # Create a random input tensor with shape (batch_size, channels, height, width)
-    input_tensor = torch.randn(1, 3, 1200, 600)  # Example input tensor
+# # Test the UnetModule class
+# if __name__ == "__main__":
+#     # Create a random input tensor with shape (batch_size, channels, height, width)
+#     input_tensor = torch.randn(1, 3, 1200, 600)  # Example input tensor
 
-    # Create an instance of the UnetModule class
-    unet_module = UnetModule()
+#     # Create an instance of the UnetModule class
+#     unet_module = UnetModule()
 
-    logger.critical("UnetModule initialized successfully.")
+#     logger.critical("UnetModule initialized successfully.")
     
-    logger.info("Layers in the UnetModule:")
-    for layer in unet_module.children():
-        logger.info(layer)
+#     logger.info("Layers in the UnetModule:")
+#     for layer in unet_module.children():
+#         logger.info(layer)
 
-    context_tensor = [
-        torch.randn(1, 3, 1200, 600),  # Example context tensor for the first layer
-        torch.randn(1, 64, 600, 300),   # Example context tensor for the second layer
-        torch.randn(1, 128, 300, 150),  # Example context tensor for the third layer
-        torch.randn(1, 192, 150, 75),   # Example context tensor for the fourth layer
-    ]
+#     context_tensor = [
+#         torch.randn(1, 3, 1200, 600),  # Example context tensor for the first layer
+#         torch.randn(1, 64, 600, 300),   # Example context tensor for the second layer
+#         torch.randn(1, 128, 300, 150),  # Example context tensor for the third layer
+#         torch.randn(1, 192, 150, 75),   # Example context tensor for the fourth layer
+#     ]
 
-    output = unet_module(input_tensor, time_tensor=torch.randn(1, 1), context_tensor=context_tensor)
-    logger.critical(f"Unet module worked successfully. Output shape: {output.shape}")
+#     output = unet_module(input_tensor, time_tensor=torch.randn(1, 1), context_tensor=context_tensor)
+#     logger.critical(f"Unet module worked successfully. Output shape: {output.shape}")

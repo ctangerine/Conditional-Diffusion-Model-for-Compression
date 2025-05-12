@@ -11,6 +11,7 @@ class LinearAttention(nn.Module):
         in_channel: int, the number of input channels
         heads: int, the number of heads
         head_dimention: int, the number of channels in each head
+        device: torch.device, device to use for computation (default: None, will use CUDA if available)
     Operations:
         1. Apply a 1x1 convolutional layer to the input tensor to calculate the query, key, and value
         2. Split the query, key, and value tensor into multiple heads
@@ -20,8 +21,11 @@ class LinearAttention(nn.Module):
         6. Calculate the output tensor by the dot product of the context and query tensor
     '''
 
-    def __init__(self, in_channel, heads=1, head_dimention=None):
+    def __init__(self, in_channel, heads=1, head_dimention=None, device=None):
         super().__init__()
+        # Set device based on availability if not provided
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         if (head_dimention is None):
             head_dimention = in_channel 
         self.heads = heads
@@ -31,8 +35,14 @@ class LinearAttention(nn.Module):
         self.hidden_dimention = heads * head_dimention
         self.to_QueryKeyValue = nn.Conv2d(in_channels=in_channel, out_channels=self.hidden_dimention * 3, bias=False, kernel_size=1)
         self.to_output = nn.Conv2d(in_channels=self.hidden_dimention, out_channels=in_channel, kernel_size=1)
+        
+        # Move model components to device
+        self.to(self.device)
 
     def forward(self, input):
+        # Move input to device
+        input = input.to(self.device)
+        
         batch_size, channel, height, width = input.size()
         query_key_value = self.to_QueryKeyValue(input)
         query_key_value = query_key_value.chunk(3, dim=1)
