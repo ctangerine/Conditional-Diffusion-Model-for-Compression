@@ -47,9 +47,9 @@ class Compressor(nn.Module):
         self, 
         in_channel=3, 
         out_channel=3, 
-        base_channel=64, 
+        base_channel=3, 
         bitrate_conditional=False, 
-        channel_multiplier=[1, 2, 3, 4, 4], 
+        channel_multiplier=[1, 2, 2, 2, 16, 32], 
         hyperprior_channel_multiplier= [3, 3, 3],
         device=None
     ):
@@ -510,7 +510,6 @@ class Compressor(nn.Module):
         logger.info(f"Input tensor device: {input_image.device}")
         
         # 1. Mã hóa
-        logger.critical(f"input image shape: {input_image.shape}")
         quantize_latent, quantize_hyper_latent, state4bpp = self.encode(input_image, bitrate_condition)
 
         # 2. Tính BPP
@@ -534,7 +533,30 @@ class Compressor(nn.Module):
     def prior_probability_loss(self):
         return self.hyper_prior.prior_probability_loss()
 
-# Calculate size of model, input (64, 3, 256, 256)
+# # Calculate size of model, input (64, 3, 256, 256)
+# model = Compressor()
+# input_tensor = torch.randn(64, 3, 256, 256)
+# input_tensor = input_tensor.to(model.device)
+# model.to(model.device)
+
+# # Calculate model size in MB
+# model_size_mb = sum(p.numel() for p in model.parameters() if p.requires_grad) * 4 / (1024 ** 2)  # 4 bytes per float32
+# input_tensor_size_mb = input_tensor.numel() * 4 / (1024 ** 2)  # 4 bytes per float32
+
+# torch.cuda.reset_peak_memory_stats()
+# model.eval()
+# with torch.no_grad():
+#     output = model(input_tensor)
+# gpu_memory = torch.cuda.max_memory_allocated() / 1024**2
+# print(f"GPU memory used: {gpu_memory:.2f} MB")
+
+
+# print(f"Model size: {model_size_mb:.2f} MB")
+# print(f"Input tensor size: {input_tensor_size_mb:.2f} MB")
+# print(f"GPU memory consumed: {gpu_memory_consumed_mb:.2f} MB")
+# print("Input tensor device:", input_tensor.device)
+# print("Model device:", next(model.parameters()).device)
+
 
         
 # # Testing the Compressor class

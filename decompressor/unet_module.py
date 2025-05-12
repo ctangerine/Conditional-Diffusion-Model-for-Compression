@@ -21,10 +21,10 @@ import torchsummary
 class UnetModule(nn.Module):
     def __init__(self, 
         base_channels=3, 
-        channels_multiplier=[1, 2, 4, 8, 16, 32, 64],
+        channels_multiplier=[1, 2, 2, 4, 8, 8, 16, 32],
         input_channels=3,
         output_channels=3,
-        context_channels=[3, 64, 128, 192],
+        context_channels=[3, 16, 32, 64, 128, 256, 384],
         time_embedding=True,
     ):
         super(UnetModule, self).__init__()

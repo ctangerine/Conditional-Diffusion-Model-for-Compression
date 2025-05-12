@@ -147,7 +147,6 @@ class DiffusionManager(nn.Module):
 
         # Print size of input tensor in mb
         input_tensor_size_mb = input_tensor.numel() * input_tensor.element_size() / (1024 ** 2)
-        print(f"Input tensor size: {input_tensor_size_mb:.2f} MB")
 
         # Move input to device
         input_tensor = input_tensor.to(self.device)
@@ -169,10 +168,10 @@ class DiffusionManager(nn.Module):
         noise_input_tensor = self.create_noise(input_tensor, timesteps_tensor)
 
         # Convert to float for U-Net
-        timesteps_tensor_float = timesteps_tensor.float()
+        timesteps_tensor = timesteps_tensor.float()
 
         # Run U-Net to predict noise
-        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor_float, context)
+        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor, context)
 
         # Convert back to long for loss calculation
         timesteps_tensor = timesteps_tensor.long()
