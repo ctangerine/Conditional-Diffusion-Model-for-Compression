@@ -29,7 +29,7 @@ class LayerNorm(nn.Module):
 
     def forward(self, input):
         # Move input to device
-        input = input.to(self.device)
+        # input = input.to(self.device)
         
         var = torch.var(input, dim=1, keepdim=True, unbiased=False)
         mean = torch.mean(input, dim=1, keepdim=True)

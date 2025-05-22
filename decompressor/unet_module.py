@@ -73,7 +73,7 @@ class UnetModule(nn.Module):
             self.encoder.append(
                 nn.ModuleList([
                     ResnetBlock(
-                        in_channel = in_channels + self.context_channels[idx] if not is_last and idx <= (len(self.context_channels) - 1) else in_channels,
+                        in_channel = (3 if idx == 0 else in_channels) + self.context_channels[idx] if not is_last and idx <= (len(self.context_channels) - 1) else in_channels,
                         out_channel = out_channels,
                         time_embedding=True,
                         time_embedding_channels=self.base_channels,

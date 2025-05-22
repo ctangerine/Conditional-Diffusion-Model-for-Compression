@@ -205,64 +205,57 @@ class HyperPrior(nn.Module):
         """
         return self._medians.detach()
 
+    # Replace the problematic cdf method with this implementation:
+
     def cdf(self, x, logits=True, detach=False):
         """
         Tính toán Hàm Phân Phối Tích Lũy (Cumulative Distribution Function - CDF).
-        CDF(x) cho biết xác suất P(biến ngẫu nhiên <= x).
-
-        Args:
-            x (Tensor): Tensor đầu vào, thường là biểu diễn ẩn 'y' hoặc y +/- 0.5.
-                        Shape: (N, C, H, W).
-            logits (bool): Nếu True, trả về kết quả *trước* khi qua hàm sigmoid cuối cùng
-                           (giá trị logit). Thường ổn định hơn về mặt số học.
-                           Nếu False, trả về xác suất CDF thực sự (trong khoảng [0, 1]).
-            detach (bool): Nếu True, thực hiện tính toán mà không theo dõi gradient
-                           cho các tham số chính của HyperPrior (affine, a, medians).
-
-        Returns:
-            Tensor: Giá trị CDF (hoặc logits) đã tính toán. Shape: (N, C, H, W).
         """
         # Move input to device
         x = x.to(self.device)
         
-        # 1. Chuẩn bị đầu vào:
-        #    Đổi shape từ (N, C, H, W) -> (C, N, H, W, 1)
-        #    - transpose(0, 1): Đưa chiều kênh (C) lên đầu để khớp parallel_dims.
-        #    - unsqueeze(-1): Thêm chiều cuối cùng (kích thước 1) để khớp in_features=1
-        #      của lớp PriorFunction đầu tiên.
+        # If detach is True, detach the input to prevent gradient flow here
+        if detach:
+            x = x.detach()
+        
+        # 1. Chuẩn bị đầu vào
         x_transformed = x.transpose(0, 1)
         x_transformed = x_transformed.unsqueeze(-1)
-
-        # Lấy danh sách tham số 'a', detach nếu cần
-        current_a = self.nonlinear_factors
-        if detach:
-            current_a = [a.detach() for a in self.nonlinear_factors]
-
-        # 2. Áp dụng chuỗi biến đổi:
-        #    Lặp qua N-1 lớp affine và yếu tố phi tuyến 'a'.
+        
+        # Get parameters, detach them if needed
+        current_a = [a.detach() if detach else a for a in self.nonlinear_factors]
+        
+        # 2. Apply transformations
         for i in range(self.num_chained_layers - 1):
             affine_layer = self.affine_transforms[i]
-            # Áp dụng lớp PriorFunction (affine + softplus(weight) + bias)
+            # Apply PriorFunction layer
             x_transformed = affine_layer(x_transformed, detach=detach)
-            # Áp dụng phần phi tuyến: x = x + tanh(a[i]) * tanh(x)
-            x_transformed = x_transformed + torch.tanh(current_a[i]) * torch.tanh(x_transformed)
-
-        # 3. Áp dụng lớp affine cuối cùng (không có phần phi tuyến 'a' theo sau).
+            
+            # Apply nonlinearity SAFELY
+            # First, clamp values to prevent extreme values that could lead to NaNs
+            safe_a = torch.clamp(current_a[i], -10, 10)
+            safe_x = torch.clamp(x_transformed, -10, 10)
+            
+            # Then compute tanh safely
+            a_tanh = torch.tanh(safe_a)
+            x_tanh = torch.tanh(safe_x)
+            
+            # Compute the transformation with additional safety
+            x_transformed = x_transformed + a_tanh * x_tanh
+        
+        # 3. Apply the final affine transformation
         last_affine_layer = self.affine_transforms[-1]
         x_transformed = last_affine_layer(x_transformed, detach=detach)
-
-        # 4. Định dạng đầu ra:
-        #    Đổi shape về lại (N, C, H, W)
-        #    - squeeze(-1): Bỏ chiều đặc trưng cuối cùng (giờ là 1). (C, N, H, W)
-        #    - transpose(0, 1): Đưa chiều batch (N) về đầu. (N, C, H, W)
+        
+        # 4. Format output
         output = x_transformed.squeeze(-1)
         output = output.transpose(0, 1)
-
-        # 5. Trả về kết quả:
+        
+        # 5. Return result
         if logits:
-            return output  # Trả về giá trị logit
+            return output  # Return logits
         else:
-            return torch.sigmoid(output) # Trả về xác suất CDF [0, 1]
+            return torch.sigmoid(output)  # Return CDF probabilities [0, 1]
 
     def pdf(self, x):
         """
@@ -341,7 +334,7 @@ class HyperPrior(nn.Module):
             Tensor: Likelihood đã tính toán cho mỗi giá trị trong x. Shape: (N, C, H, W).
         """
         # Move input to device
-        x = x.to(self.device)
+        # x = x.to(self.device)
         
         # 1. Tính CDF logits tại các điểm biên của khoảng lượng tử hóa:
         lower_logit = self.cdf(x - 0.5, logits=True, detach=False) # logit(CDF(x - 0.5))

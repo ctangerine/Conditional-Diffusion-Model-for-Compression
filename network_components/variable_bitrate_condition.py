@@ -30,8 +30,8 @@ class VariableBitrateCondition(nn.Module):
 
     def forward(self, input, condition):
         # Move inputs to device
-        input = input.to(self.device)
-        condition = condition.to(self.device)
+        # input = input.to(self.device)
+        # condition = condition.to(self.device)
         
         condition = condition.reshape(-1, 1, 1, 1)
         scale = self.scale(condition)

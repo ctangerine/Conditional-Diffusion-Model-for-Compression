@@ -41,7 +41,7 @@ class LinearAttention(nn.Module):
 
     def forward(self, input):
         # Move input to device
-        input = input.to(self.device)
+        # input = input.to(self.device)
         
         batch_size, channel, height, width = input.size()
         query_key_value = self.to_QueryKeyValue(input)

@@ -14,7 +14,7 @@ class DownSampling(nn.Module):
 
     def forward(self, input):
         # Move input to device
-        input = input.to(self.device)
+        # input = input.to(self.device)
         return self.conv_layer(input)
     
 class UpSampling(nn.Module):

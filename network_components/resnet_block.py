@@ -50,12 +50,14 @@ class ResnetBlock(nn.Module):
 
     def forward(self, input, time_tensor=None): 
         # Move input to the same device as the model
-        input = input.to(self.device)
+        # input = input.to(self.device)
         
-        if time_tensor is not None:
-            time_tensor = time_tensor.to(self.device)
+        # if time_tensor is not None:
+        #     time_tensor = time_tensor.to(self.device)
             
-        self.time_tensor = time_tensor if time_tensor is not None else None
+        # self.time_tensor = time_tensor if time_tensor is not None else None
+
+        # print("Time tensor is not None") if time_tensor is not None else print("Time tensor is None")
 
         conv = None
         for module in self.resnet_block:
@@ -82,5 +84,5 @@ class BaseResidualBlock(nn.Module):
 
     def forward(self, x):
         # Move input to the same device as the model
-        x = x.to(self.device)
+        # x = x.to(self.device)
         return x + self.functional(x)

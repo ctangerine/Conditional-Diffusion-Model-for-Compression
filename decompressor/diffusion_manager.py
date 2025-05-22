@@ -1,7 +1,11 @@
 import os
 import sys
+import time
+
+from network_components.utils import extract
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import cv2
 import numpy as np
 
 from compressor.compressor import Compressor
@@ -15,6 +19,9 @@ from torch.nn import functional as F
 
 import lpips
 
+from PIL import Image
+
+
 class DiffusionManager(nn.Module):
     def __init__(
         self, 
@@ -22,8 +29,8 @@ class DiffusionManager(nn.Module):
         u_net=UnetModule,
         num_timesteps=1000,
         bpp_loss_weight=0.2,
-        lpips_loss_weight=0.2,
-        mse_loss_weight=0.6,
+        lpips_loss_weight=0.55,
+        mse_loss_weight=1,
         device=None
     ):
         super(DiffusionManager, self).__init__()
@@ -70,7 +77,7 @@ class DiffusionManager(nn.Module):
         # Move all parameters to specified device
         self.to(self.device)
 
-    def cosine_beta_schedule(self, timesteps, s=0.08):
+    def cosine_beta_schedule(self, timesteps, s=0.008):
         """
         Tạo lịch trình beta dựa trên hàm cosine theo phương pháp đề xuất 
         trong paper "Improved Denoising Diffusion Probabilistic Models":
@@ -103,53 +110,48 @@ class DiffusionManager(nn.Module):
     
     def create_noise(self, input_start, step_t, noise=None):
         # Move input to device
-        input_start = input_start.to(self.device)
-        step_t = step_t.to(self.device)
+        # input_start = input_start.to(self.device)
+        # step_t = step_t.to(self.device)
         
         # Create noise by formulas: x_t = sqrt(alpha_cumprod) * x_0 + sqrt(1 - alpha_cumprod) * noise
         if noise is None:
             noise = torch.randn_like(input_start, device=self.device)
-        else:
-            noise = noise.to(self.device)
 
         # Tạo nhiễu theo công thức: x_t = sqrt(alpha_cumprod) * x_0 + sqrt(1 - alpha_cumprod) * noise
         sqrt_ac = self.sqrt_ac[step_t].view(-1, 1, 1, 1)
         sqrt_omac = self.sqrt_omac[step_t].view(-1, 1, 1, 1)
         x_t = sqrt_ac * input_start + sqrt_omac * noise
 
-        return x_t
+        return x_t, noise
     
     def denoise_to_x0(self, input_step_t, step_t, estimate_noise):
         # Move inputs to device
-        input_step_t = input_step_t.to(self.device)
-        step_t = step_t.to(self.device)
-        estimate_noise = estimate_noise.to(self.device)
+        # input_step_t = input_step_t.to(self.device)
+        # step_t = step_t.to(self.device)
+        # estimate_noise = estimate_noise.to(self.device)
         
         sqrt_inv_ac = self.sqrt_inv_ac[step_t].view(-1, 1, 1, 1)
 
-        estimate_x0 = sqrt_inv_ac * (input_step_t - self.sqrt_omac[step_t].view(-1, 1, 1, 1) * estimate_noise)
+        # estimate_x0 = sqrt_inv_ac * (input_step_t) - self.sqrt_omac[step_t].view(-1, 1, 1, 1) * estimate_noise
+        estimate_x0 = extract(self.sqrt_inv_ac, step_t, input_step_t.shape)*input_step_t - extract(self.sqrt_inv_ac_m1, step_t, input_step_t.shape)*estimate_noise
         return estimate_x0
     
-    def loss_fn(self, input_step_t, step_t, estimate_noise):
+    def loss_fn(self, noise_input, noise, step_t, estimate_noise):
         # Move inputs to device
-        input_step_t = input_step_t.to(self.device)
-        step_t = step_t.to(self.device)
-        estimate_noise = estimate_noise.to(self.device)
+        # noise_input = noise_input.to(self.device)
+        # step_t = step_t.to(self.device)
+        # estimate_noise = estimate_noise.to(self.device)
         
         # Tính toán loss theo công thức: L = ||x_0 - x_0_hat||^2
         # Trong đó x_0_hat = x_t - sqrt(1 - alpha_cumprod) * noise
-        estimate_x0 = self.denoise_to_x0(input_step_t, step_t, estimate_noise)
-        loss = F.mse_loss(estimate_x0, input_step_t)
+        estimate_x0 = self.denoise_to_x0(noise_input, step_t, estimate_noise)
+        loss = F.mse_loss(noise, estimate_noise)
 
-        return loss
+        return loss, estimate_x0
     
     def forward(self, input_tensor):
-
-        # Print size of input tensor in mb
-        input_tensor_size_mb = input_tensor.numel() * input_tensor.element_size() / (1024 ** 2)
-
         # Move input to device
-        input_tensor = input_tensor.to(self.device)
+        # input_tensor = input_tensor.to(self.device)
         
         batch_size = input_tensor.size(0)
 
@@ -163,22 +165,32 @@ class DiffusionManager(nn.Module):
 
         # Generate random timesteps
         timesteps_tensor = torch.randint(0, self.num_timesteps, (batch_size,), device=self.device).long()
+        # timesteps_tensor = torch.full((batch_size,), self.num_timesteps - 1, device=self.device).long()
 
         # Create noisy input
-        noise_input_tensor = self.create_noise(input_tensor, timesteps_tensor)
+        noise_input_tensor, noise = self.create_noise(input_tensor, timesteps_tensor)
+
+        # # # convert first image in noise_input_tensor to image and show
+        # image = noise_input_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+        # image = (image * 0.5 + 0.5).clip(0, 1)  # Chuyển về [0, 1]
+        # image = Image.fromarray((image * 255).astype(np.uint8))
+        # image.show()
 
         # Convert to float for U-Net
-        timesteps_tensor = timesteps_tensor.float()
+        timesteps_tensor_float = timesteps_tensor.float() / self.num_timesteps
 
         # Run U-Net to predict noise
-        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor, context)
+        predicted_noise = self.u_net(noise_input_tensor, timesteps_tensor_float, context)
 
         # Convert back to long for loss calculation
         timesteps_tensor = timesteps_tensor.long()
 
         # Calculate losses
-        mse_loss = self.loss_fn(noise_input_tensor, timesteps_tensor, predicted_noise)
-        lpips_loss = self.lpips_loss(input_tensor, predicted_noise).mean()
+        mse_loss, estimate_x0 = self.loss_fn(noise_input_tensor, noise, timesteps_tensor, predicted_noise)
+        # get one estimate x0
+        
+        # Calculate LPIPS loss between input_tensor and estimate_x0
+        lpips_loss = self.lpips_loss(input_tensor, estimate_x0).mean()
         bpp_loss = bpp.mean()
 
         # Dynamic bitrate weight
@@ -187,103 +199,128 @@ class DiffusionManager(nn.Module):
 
         # Calculate total loss
         total_loss = (
-            self.mse_loss_weight * mse_loss +
-            self.lpips_loss_weight * lpips_loss +
-            self.bpp_loss_weight * bpp_loss
+            self.mse_loss_weight * mse_loss +0
+            # 0.3 * lpips_loss
+            # self.bpp_loss_weight * bpp_loss
         )
 
         # Calculate prior probability loss
         prior_probability_loss = self.encoder.prior_probability_loss()
 
-        return total_loss, prior_probability_loss
+        loss_dict = {
+            "total_loss": total_loss,
+            "mse_loss": mse_loss,
+            "lpips_loss": lpips_loss,
+            "bpp_loss": bpp_loss,
+            "prior_probability_loss": prior_probability_loss,
+        }
+
+        estimate_x0 = estimate_x0[0].unsqueeze(0)
+
+        return total_loss, prior_probability_loss, estimate_x0, loss_dict, noise_input_tensor
+    
+
+    def evaluate_ddim(
+        self,
+        original_image,
+        start_noise,
+        denoise_steps = 30,
+    ):
+        batch_size = start_noise.size(0)
+        time_steps = torch.linspace(0, self.num_timesteps - 1, denoise_steps).long().to(self.device)
+        self.test_ac = self.alphas_cumprod[time_steps]
+        self.test_ac_prev = torch.cat([torch.ones(1, device=self.device), self.test_ac[:-1]], dim=0)
+        self.test_sqrt_ac = torch.sqrt(self.test_ac)
+        self.test_sqrt_ac_prev = torch.sqrt(self.test_ac_prev)
+        self.test_inv_ac = 1 / self.test_ac
+        self.test_inv_ac_prev = 1 / self.test_ac_prev
+        self.test_sqrt_omac = torch.sqrt(1 - self.test_ac)
+        self.test_sqrt_omac_prev = torch.sqrt(1 - self.test_ac_prev)
+        self.test_sqrt_inv_ac = torch.sqrt(self.test_inv_ac)
+        self.test_sqrt_inv_ac_prev = torch.sqrt(self.test_inv_ac_prev)
+        self.test_sqrt_inv_ac_m1 = torch.sqrt(self.test_inv_ac - 1)
+        self.test_sqrt_inv_ac_m1_prev = torch.sqrt(self.test_inv_ac_prev - 1)
+
+        # self.sigma = torch.sqrt(
+        #     (1 - self.test_ac_prev) / (1 - self.test_ac) * (1 - self.test_ac_prev / self.test_ac)
+        # )
+
+        encoder_output = self.encoder(original_image)
+
+        context, bpp, _, _ = encoder_output["output"], encoder_output["bpp"], encoder_output["quantize_latent"], encoder_output["quantize_hyper_latent"]
+
+        denoise_result = None
+        for step_idx in reversed(range(0, denoise_steps)):
+            step_t = torch.full((batch_size,), step_idx, device=self.device).long()
+            print(f"Step {step_idx}/{denoise_steps-1}")
+            t_normalized = step_t.float() / denoise_steps
+            predicted_noise_stept = self.u_net(start_noise, t_normalized, context)
+
+            reconstruction_stept = self.ddim_denoise_step_t(
+                start_noise, step_t, predicted_noise_stept
+            )
+
+            next_step_noise = reconstruction_stept
+            # next_step_noise = self.test_sqrt_ac_prev[step_t] * next_step_noise + self.test_sqrt_omac_prev[step_t] * predicted_noise_stept
+            next_step_noise = extract(self.test_sqrt_ac_prev, step_t, start_noise.shape) * next_step_noise \
+                            + extract(self.test_sqrt_omac_prev, step_t, start_noise.shape) * predicted_noise_stept
+            # Draw first image in start_noise before updating it
+            first_image = next_step_noise[0].permute(1, 2, 0).detach().cpu().numpy()
+            first_image = (first_image * 0.5 + 0.5).clip(0, 1)
+            first_image = Image.fromarray((first_image * 255).astype(np.uint8))
+            first_image.show()
+
+            time.sleep(300)
+
+            start_noise = next_step_noise
+
+            image = reconstruction_stept[0].permute(1, 2, 0).detach().cpu().numpy()
+            image = (image * 0.5 + 0.5).clip(0, 1)
+            image = (image * 255).astype(np.uint8)
+
+            # Chuyển sang định dạng BGR cho OpenCV
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+            # Save the first, middle, and last constructed images in a folder with differentiated names
+            save_dir = "denoised_results"
+            os.makedirs(save_dir, exist_ok=True)
+            if step_idx == denoise_steps - 1:
+                filename = f"first_denoised_image_{int(time.time())}.png"
+                save_path = os.path.join(save_dir, filename)
+                cv2.imwrite(save_path, image_bgr)
+            if step_idx == denoise_steps // 2:
+                filename = f"middle_denoised_image_{int(time.time())}.png"
+                save_path = os.path.join(save_dir, filename)
+                cv2.imwrite(save_path, image_bgr)
+            if step_idx == 0:
+                filename = f"last_denoised_image_{int(time.time())}.png"
+                save_path = os.path.join(save_dir, filename)
+                cv2.imwrite(save_path, image_bgr)
+                denoise_result = reconstruction_stept
+
+            del image_bgr
+            del image
+
+        return denoise_result
+        
        
+    def ddim_denoise_step_t(self, input_step_t, step_t, estimate_noise):
+        # Get 1/√(α_t)
+        sqrt_inv_alpha = extract(self.test_sqrt_inv_ac, step_t, input_step_t.shape)
+        # Get √(1/α_t - 1) - this is mathematically equivalent to √(1-α_t)/√(α_t)
+        sqrt_one_minus_alpha_over_alpha = extract(self.test_sqrt_inv_ac_m1, step_t, input_step_t.shape)
+        
+        # Correctly predict x₀ using your formula
+        predicted_x0 = sqrt_inv_alpha * input_step_t - sqrt_one_minus_alpha_over_alpha * estimate_noise
+        
+        return predicted_x0
+    
+    def draw_image(input):
+        image = input[0].cpu().detach().numpy()
+        image = np.transpose(image, (1, 2, 0))
+        image = (image * 255).astype(np.uint8)
+        image = Image.fromarray(image)
+        image.show()
+        time.sleep(1)
+        image.close()
 
-# import matplotlib.pyplot as plt
-# from PIL import Image
-# from torchvision import transforms
-
-# # Khởi tạo diffusion manager
-# compressor = Compressor(
-#     in_channel=3,
-#     out_channel=3,
-#     base_channel=64,
-#     bitrate_conditional=True,
-# )
-
-# unet_module = UnetModule()
-
-# diffusion = DiffusionManager(
-#     encoder=compressor,
-#     u_net=unet_module,
-# )
-
-# torch.cuda.empty_cache()
-
-# # Load ảnh
-# img_path = "dogpicture.png"
-# image = Image.open(img_path).convert("RGB")
-# transform = transforms.Compose([
-#     transforms.Resize((128, 128)),  # Resize để xử lý nhanh
-#     transforms.ToTensor(),          # Chuyển sang tensor
-# ])
-# img_tensor = transform(image).unsqueeze(0)  # Thêm batch dimension (1, 3, H, W)
-
-# output = diffusion(img_tensor)
-
-# print("Output 0:", output[0])  # In ra đầu ra
-# print("Output 1:", output[1])  # In ra đầu ra
-
-
-# # Tạo nhiễu ngẫu nhiên và hiển thị ảnh với nhiễu
-# noise = diffusion.create_noise(img_tensor, step_t=50, noise=None)
-# print("Noise shape:", noise.shape)
-# noised_image = noise
-# noised_image = noised_image.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-# noised_image = (noised_image * 0.5 + 0.5).clip(0, 1)  # Chuyển về [0, 1]
-
-# plt.subplot(1, 2, 1)
-# plt.imshow(noised_image)
-# plt.title("Image with Noise")
-# plt.axis("off")
-
-# plt.tight_layout()
-# # plt.show()
-
-
-
-# # Tạo nhiễu ngẫu nhiên và hiển thị ảnh với nhiễu
-# noise = diffusion.create_noise(img_tensor, step_t=50, noise=None)
-# print("Noise shape:", noise.shape)
-# noised_image = noise
-# noised_image = diffusion.denoise_to_x0(noised_image, step_t=500, estimate_noise=noise)
-# noised_image = noised_image.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-# noised_image = (noised_image * 0.5 + 0.5).clip(0, 1)  # Chuyển về [0, 1]
-
-# plt.subplot(1, 2, 2)
-# plt.imshow(noised_image)
-# plt.title("Image with Noise")
-# plt.axis("off")
-
-# plt.tight_layout()
-# plt.show()
-
-# # Tạo nhiễu tại các bước thời gian
-# timesteps_to_show = [0, 50, 100, 200, 400, 600, 800, 999]
-
-# plt.figure(figsize=(18, 6))
-# for idx, t in enumerate(timesteps_to_show):
-#     t_tensor = torch.tensor([t], dtype=torch.long)
-#     noised = diffusion.create_noise(img_tensor, t_tensor)
-
-#     # Đưa tensor về ảnh để hiển thị
-#     img_np = noised.squeeze(0).detach().cpu()
-#     img_np = (img_np * 0.5 + 0.5).clamp(0, 1)  # Chuyển lại về [0, 1]
-#     img_np = img_np.permute(1, 2, 0).numpy()
-
-#     plt.subplot(1, len(timesteps_to_show), idx + 1)
-#     plt.imshow(img_np)
-#     plt.title(f"Step {t}")
-#     plt.axis("off")
-
-# plt.tight_layout()
-# plt.show()
