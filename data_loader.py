@@ -1,6 +1,7 @@
 import gc
 import os
 import glob
+import time
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -44,8 +45,10 @@ class ImageOnlyDataset(Dataset):
         return len(self.image_paths)
     
     def __getitem__(self, idx):
+        # start_time = time.time()
         # Check if image is in cache
         if idx in self.cache:
+            # print(f"Cache hit for index {idx} (time: {time.time() - start_time:.4f}s)")
             return self.cache[idx]
         
         # Load image only when needed
@@ -57,14 +60,17 @@ class ImageOnlyDataset(Dataset):
                     image = self.transform(image)
                 if self.cache_size > 0 and len(self.cache) < self.cache_size:
                     self.cache[idx] = image
+                # print(f"Loaded image {image_path} (time: {time.time() - start_time:.4f}s)")
                 return image
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
             return torch.zeros(3, 256, 256)  # Placeholder on failure
 
     def clear_cache(self):
+        # start_time = time.time()
         self.cache.clear()
         gc.collect()
+        # print(f"Cache cleared (time: {time.time() - start_time:.4f}s)")
 
 
 # Setup the dataset and dataloader
@@ -89,3 +95,44 @@ def get_coco_patches_loader(
     
     return dataloader, dataset
 
+# if __name__ == "__main__":
+#     # Cấu hình loader
+#     BATCH_SIZE = 4
+#     NUM_WORKERS = 0  # Để đo chính xác, tránh đa luồng
+#     MAX_IMAGES = 10  # Giới hạn số ảnh test nhanh
+    
+#     train_loader, train_dataset = get_coco_patches_loader(
+#         data_dir="D:\\ds_coco_patches",
+#         batch_size=BATCH_SIZE,
+#         pin_memory=True,
+#         num_workers=NUM_WORKERS,
+#         shuffle=False,
+#         cache_size=0,
+#         max_images=MAX_IMAGES
+#     )
+    
+#     print("\n--- Đo thời gian __getitem__ của dataset ---")
+#     total_getitem_time = 0
+#     for idx in range(len(train_dataset)):
+#         start = time.time()
+#         _ = train_dataset[idx]  # Gọi __getitem__
+#         elapsed = time.time() - start
+#         print(f"[__getitem__] Index {idx}: {elapsed:.4f} giây")
+#         total_getitem_time += elapsed
+    
+#     print(f"Tổng thời gian __getitem__ cho {len(train_dataset)} ảnh: {total_getitem_time:.4f} giây")
+#     print(f"Thời gian trung bình __getitem__ trên mỗi ảnh: {total_getitem_time / len(train_dataset):.4f} giây")
+    
+#     print("\n--- Đo thời gian lấy batch từ DataLoader ---")
+#     total_batch_time = 0
+#     for batch_idx, batch in enumerate(train_loader):
+#         start = time.time()
+#         # batch đã được yield từ DataLoader, gồm __getitem__ + collate
+#         elapsed = time.time() - start
+#         print(f"[DataLoader] Batch {batch_idx}: {elapsed:.4f} giây")
+#         total_batch_time += elapsed
+#         if batch_idx >= 2:
+#             break
+    
+#     print(f"Tổng thời gian lấy 3 batch từ DataLoader: {total_batch_time:.4f} giây")
+#     print(f"Thời gian trung bình lấy batch: {total_batch_time / (batch_idx+1):.4f} giây")
