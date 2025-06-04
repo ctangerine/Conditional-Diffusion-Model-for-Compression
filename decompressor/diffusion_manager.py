@@ -250,7 +250,7 @@ class DiffusionManager(nn.Module):
         context, bpp, _, _ = encoder_output["output"], encoder_output["bpp"], encoder_output["quantize_latent"], encoder_output["quantize_hyper_latent"]
 
         denoise_result = None
-        for step_idx in reversed(range(0, denoise_steps)):
+        for step_idx in reversed(range(0, denoise_steps-1)):
             step_t = torch.full((batch_size,), step_idx, device=self.device).long()
             print(f"Step {step_idx}/{denoise_steps-1}")
             t_normalized = step_t.float() / denoise_steps
@@ -264,13 +264,12 @@ class DiffusionManager(nn.Module):
             # next_step_noise = self.test_sqrt_ac_prev[step_t] * next_step_noise + self.test_sqrt_omac_prev[step_t] * predicted_noise_stept
             next_step_noise = extract(self.test_sqrt_ac_prev, step_t, start_noise.shape) * next_step_noise \
                             + extract(self.test_sqrt_omac_prev, step_t, start_noise.shape) * predicted_noise_stept
+            next_step_noise = next_step_noise.clamp(-1, 1)
             # Draw first image in start_noise before updating it
-            first_image = next_step_noise[0].permute(1, 2, 0).detach().cpu().numpy()
-            first_image = (first_image * 0.5 + 0.5).clip(0, 1)
-            first_image = Image.fromarray((first_image * 255).astype(np.uint8))
-            first_image.show()
-
-            time.sleep(300)
+            # first_image = next_step_noise[0].permute(1, 2, 0).detach().cpu().numpy()
+            # first_image = (first_image * 0.5 + 0.5).clip(0, 1)
+            # first_image = Image.fromarray((first_image * 255).astype(np.uint8))
+            # first_image.show()
 
             start_noise = next_step_noise
 
@@ -320,7 +319,7 @@ class DiffusionManager(nn.Module):
         image = np.transpose(image, (1, 2, 0))
         image = (image * 255).astype(np.uint8)
         image = Image.fromarray(image)
-        image.show()
-        time.sleep(1)
-        image.close()
+        # image.show()
+        # time.sleep(1)
+        # image.close()
 

@@ -93,8 +93,8 @@ class CDCTrainable(nn.Module):
     def create_variable_for_extractor_phase(
         self,
         in_channels=3,
-        channel_multiplier=[1, 6, 12, 24, 32, 64],
-        base_channels=3,
+        channel_multiplier=[1, 2, 3, 4, 5, 6],
+        base_channels=32,
         hyper_multiplier=[1, 1, 1],
     ):
         self.extractor = nn.ModuleList()
@@ -230,32 +230,44 @@ class CDCTrainable(nn.Module):
     def create_variable_image_generator_phase(
         self,
         context_channels=[3, 16, 32, 64, 128, 256],
-        time_embedding_channels=16,
+        base_channels=32,
+        channel_multiplier=[1, 2, 3, 4, 5 ,6, 7, 8],
+        time_embedding_channels=128,
     ):
-        self.unet_encoder = nn.ModuleList()
+        self.unet_encoder = nn.ModuleList() 
         self.unet_bottleneck = nn.ModuleList()
         self.unet_decoder = nn.ModuleList()
-        self.num_layers = len(context_channels)
+        self.num_layers = len(channel_multiplier)
         self.context_channels = context_channels
         self.base_channels = context_channels
         self.tec = time_embedding_channels # Time Embedding Channels
 
+        dims = [3, *(map(lambda m: base_channels * m, channel_multiplier))]
+        in_out = list(zip(dims[:-1], dims[1:]))
+
+        print("UNet Encoder Input-Output Pairs:", in_out)
+
         self.uec_pairs = []  # UNet Encoder Channels Pair     
-        old_layer = 3
-        for idx, layer in enumerate(self.base_channels):
+        for idx, (layer_in, layer_out) in enumerate(in_out):
+            is_last = True if idx == len(channel_multiplier) - 1 else False
             self.uec_pairs.append(
-                (layer + old_layer, layer*2)
+                (context_channels[idx] + layer_in if not is_last and idx < len(context_channels) else layer_in, layer_out)
             )
-            old_layer = layer*2
+
+        print("UNet Encoder Channels Pairs:", self.uec_pairs)
 
         self.udc_pairs = []  # UNet Decoder Channels Pair
-        encode_channels = [layer * 2 for layer in self.base_channels]
-        old_layer = 0
-        for idx, layer in enumerate(encode_channels[::-1]):
+        reversed_in_out = list(reversed(in_out[:]))
+        for idx, (layer_in, layer_out) in enumerate(reversed_in_out):
+            is_last = idx == len(reversed_in_out) - 1
+            out_channels = 3 if is_last else layer_in
             self.udc_pairs.append(
-                (layer + old_layer, layer)
+                (layer_out * 2, out_channels)
             )
-            old_layer = layer
+
+        print("UNet Decoder Channels Pairs:", self.udc_pairs)
+
+        print("Context Channels:", self.context_channels)
 
         self.create_network_image_generator_phase()
 
@@ -268,22 +280,27 @@ class CDCTrainable(nn.Module):
     def create_network_image_generator_phase(self):
         self.time_embedding = nn.Sequential(
             nn.Linear(1, 64),
-            nn.GELU(),
-            nn.Linear(64, 16),
+            nn.SiLU(),
+            nn.Linear(64, 256),
+            nn.SiLU(),
+            nn.Linear(256, 128)
         )
+
+        # self.time_embedding = SinusoidalPosEmb(128)
 
         for idx, (layer_in, layer_out) in enumerate(self.uec_pairs):
             is_last = True if idx == self.num_layers - 1 else False
             block = nn.ModuleList([
-                ResnetBlock(layer_in, layer_in*2, time_embedding=True, time_embedding_channels=self.tec),
-                ResnetBlock(layer_in*2, layer_out, time_embedding=True, time_embedding_channels=self.tec),
+                ResnetBlock(layer_in, layer_in, time_embedding=True, time_embedding_channels=self.tec),
+                ResnetBlock(layer_in, layer_out, time_embedding=True, time_embedding_channels=self.tec),
                 LayerNorm(layer_out),
                 LinearAttention(layer_out),
                 DownSampling(layer_out, layer_out) if not is_last else nn.Identity(),
             ])
+            # setattr(self, f'unet_up_layer{idx}', block)
             self.unet_encoder.append(block)
 
-        bottleneck_in_channel = self.base_channels[-1] * 2 
+        bottleneck_in_channel = self.uec_pairs[-1][1]
         self.unet_bottleneck.append(
             nn.ModuleList([
                 ResnetBlock(bottleneck_in_channel, bottleneck_in_channel, time_embedding=True, time_embedding_channels=self.tec),
@@ -294,7 +311,7 @@ class CDCTrainable(nn.Module):
         )
 
         for idx, (layer_in, layer_out) in enumerate(self.udc_pairs):
-            is_last = True if idx == self.num_layers -1 else False
+            is_last = True if idx == self.num_layers - 1 else False
             block = nn.ModuleList([
                 ResnetBlock(layer_in, layer_in, time_embedding=True, time_embedding_channels=self.tec),
                 ResnetBlock(layer_in, layer_out, time_embedding=True, time_embedding_channels=self.tec),
@@ -302,13 +319,16 @@ class CDCTrainable(nn.Module):
                 LinearAttention(layer_out),
                 UpSampling(layer_out, layer_out) if not is_last else nn.Identity(),
             ])
+            # setattr(self, f'unet_down_layer{idx}', block)
             self.unet_decoder.append(block)
 
         last_layer_channel = self.udc_pairs[-1][1]
         self.unet_decoder.append(
             nn.Sequential(
                 LayerNorm(last_layer_channel),
-                nn.Conv2d(last_layer_channel, 3, kernel_size=5, stride=1, padding=2),
+                nn.Conv2d(last_layer_channel, 3, kernel_size=7, stride=1, padding=3),
+                # nn.ReLU(),
+                # nn.Conv2d(12, 3, kernel_size=1, stride=1, padding=0)
             )
         )
 
@@ -318,13 +338,16 @@ class CDCTrainable(nn.Module):
         cat_layer = [input_tensor]
 
         for idx, (res1, res2, layer_norm, attention, downsample) in enumerate(self.unet_encoder):
-            cat_tensor = torch.cat([input_tensor, context_tensor[idx]], dim=1)
+            is_last = True if idx == self.num_layers - 1 else False
+            if idx < len(context_tensor):
+                cat_tensor = torch.cat([input_tensor, context_tensor[idx]], dim=1)
+            else:
+                cat_tensor = input_tensor
             input_tensor = res1(cat_tensor, time_tensor)
             input_tensor = res2(input_tensor, time_tensor)
             input_tensor = layer_norm(input_tensor)
             input_tensor = attention(input_tensor)
-            if (idx != len(self.udc_pairs) -1):
-                cat_layer.append(input_tensor)
+            cat_layer.append(input_tensor)
             input_tensor = downsample(input_tensor)
         del cat_tensor
         torch.cuda.empty_cache()
@@ -336,10 +359,7 @@ class CDCTrainable(nn.Module):
             input_tensor = res2(input_tensor, time_tensor)
 
         for idx, (res1, res2, layer_norm, attention, upsample) in enumerate(self.unet_decoder[:-1]):
-            if idx != 0:
-                cat_tensor = torch.cat([input_tensor, cat_layer.pop()], dim=1)
-            else:
-                cat_tensor = input_tensor
+            cat_tensor = torch.cat([input_tensor, cat_layer.pop()], dim=1)
             input_tensor = res1(cat_tensor, time_tensor)
             input_tensor = res2(input_tensor, time_tensor)
             input_tensor = layer_norm(input_tensor)
@@ -468,7 +488,7 @@ class CDCTrainable(nn.Module):
             timesteps_tensor = torch.full((image_tensor.shape[0],), step_t, device=self.device).long()  # Convert to shape (batch_size,)
             predict_noise = self.unet_forward(start_noise, context, float_timesteps_tensor)
             predict_x0 = self.ddim_denoise_step_t(start_noise, timesteps_tensor, predict_noise)
-            predict_x0 = predict_x0.clamp(-1.0, 1.0)  # Clamp to valid range
+            predict_x0 = predict_x0.clamp(0, 1.0)  # Clamp to valid range
             start_noise = self.ddim_input_for_nextstep(predict_x0, predict_noise, timesteps_tensor)
             self.save_sample(predict_x0, step=step_t)
             
@@ -497,9 +517,9 @@ class CDCTrainable(nn.Module):
         save_image(tensor, os.path.join(path, filename))
 
 # Device setup
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# model = CDCTrainable(device=device)
-# model = model.to(device)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = CDCTrainable(device=device)
+model = model.to(device)
 
 
 # model.create_ddim_phase_variable()
@@ -533,12 +553,12 @@ class CDCTrainable(nn.Module):
 #     print(f"Epoch {epoch+1} completed in {time.time() - start_time:.5f} seconds")
 
 # For model summary with torchsummary
-# try:
-#     from torchsummary import summary
-#     # Generate model summary for the CDCTrainable model
-#     summary(model, input_size=(3, 256, 256), device=str(device))
-# except ImportError:
-#     print("Install torchsummary for model summary: pip install torchsummary")
+try:
+    from torchsummary import summary
+    # Generate model summary for the CDCTrainable model
+    summary(model, input_size=(3, 256, 256), device=str(device))
+except ImportError:
+    print("Install torchsummary for model summary: pip install torchsummary")
 
 # # Calculate actual memory consumption
 # if torch.cuda.is_available():

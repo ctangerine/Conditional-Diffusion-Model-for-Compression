@@ -48,9 +48,13 @@ class UnetModule(nn.Module):
 
         if self.time_embedding:
             self.time_embedding_layer = nn.Sequential(
-                nn.Linear(1, self.base_channels*4),
-                nn.GELU(),
-                nn.Linear(self.base_channels*4, self.base_channels),
+                nn.Linear(1, 64),
+                nn.SiLU(),
+                nn.Linear(64, 128),
+                nn.SiLU(),
+                nn.Linear(128, 256),
+                nn.SiLU(),
+                nn.Linear(256, 128),             # Output channels for time embedding
             )
 
         else:
@@ -76,9 +80,9 @@ class UnetModule(nn.Module):
                         in_channel = (3 if idx == 0 else in_channels) + self.context_channels[idx] if not is_last and idx <= (len(self.context_channels) - 1) else in_channels,
                         out_channel = out_channels,
                         time_embedding=True,
-                        time_embedding_channels=self.base_channels,
+                        time_embedding_channels=128,
                     ),
-                    ResnetBlock(out_channels, out_channels, time_embedding=True, time_embedding_channels=self.base_channels),
+                    ResnetBlock(out_channels, out_channels, time_embedding=True, time_embedding_channels=128),
                     LayerNorm(out_channels),
                     LinearAttention(out_channels, head_dimention=4),
                     DownSampling(
@@ -94,11 +98,11 @@ class UnetModule(nn.Module):
                     in_channel = bottleneck_in_channel,
                     out_channel = bottleneck_in_channel,
                     time_embedding=True,
-                    time_embedding_channels=self.base_channels,
+                    time_embedding_channels=128,
                 ),
                 LayerNorm(bottleneck_in_channel),
                 LinearAttention(bottleneck_in_channel, head_dimention=4),
-                ResnetBlock(bottleneck_in_channel, bottleneck_in_channel, time_embedding=True, time_embedding_channels=self.base_channels),
+                ResnetBlock(bottleneck_in_channel, bottleneck_in_channel, time_embedding=True, time_embedding_channels=128),
             ])
         )
 
@@ -110,9 +114,9 @@ class UnetModule(nn.Module):
                         in_channel = in_channels*2,
                         out_channel = out_channels,
                         time_embedding=True,
-                        time_embedding_channels=self.base_channels,
+                        time_embedding_channels=128,
                     ),
-                    ResnetBlock(out_channels, out_channels, time_embedding=True, time_embedding_channels=self.base_channels),
+                    ResnetBlock(out_channels, out_channels, time_embedding=True, time_embedding_channels=128),
                     LayerNorm(out_channels),
                     LinearAttention(out_channels, head_dimention=4),
                     UpSampling(

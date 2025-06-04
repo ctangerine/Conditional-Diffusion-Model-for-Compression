@@ -28,3 +28,6 @@ dist/
 test.ipynb
 compressor.log
 unet_module.log
+sample
+visualizations
+/checkpoints
