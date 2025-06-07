@@ -13,6 +13,7 @@ from torchvision import transforms
 from torchvision.utils import save_image
 import datetime
 
+from network_components.hyper_prior import HyperPrior
 from network_components.layer_normalization import LayerNorm
 from network_components.linear_attention import LinearAttention
 from network_components.resize_input import DownSampling, UpSampling
@@ -20,12 +21,26 @@ from network_components.resize_input import DownSampling, UpSampling
 # Modern autocast import
 from torch.amp import autocast
 
-from network_components.utils import extract
+from network_components.utils import NormalDistribution, extract, quantize
 from PIL import Image
 from torchvision import transforms
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+class VariableBitrateCondition(nn.Module):
+    def __init__(self, input_channel, output_channel, device=None):
+        super().__init__()     
+        self.input_channel = input_channel
+        self.output_channel = output_channel
+        self.scale = nn.Conv2d(in_channels=input_channel, out_channels=output_channel, kernel_size=1, bias=False)
+        self.shift = nn.Conv2d(in_channels=input_channel, out_channels=output_channel, kernel_size=1, bias=False)
+
+    def forward(self, input, condition):
+        condition = condition.reshape(-1, 1, 1, 1)
+        scale = self.scale(condition)
+        shift = self.shift(condition)
+        return input * scale + shift
 
 class ResnetBlock(nn.Module):
     def __init__(self, in_channel, out_channel, large=False, time_embedding=False, time_embedding_channels=None):
@@ -80,7 +95,8 @@ class CDCTrainable(nn.Module):
         self.create_variable_for_extractor_phase()
 
         dummy_input = torch.randn(1, 3, 256, 256).to(self.device)
-        context = self.extractor_forward(dummy_input)
+        dummy_bitrate_condition = torch.tensor([0.5], device=self.device).unsqueeze(0)  # Shape (1, 1)   
+        context, bpp = self.extractor_forward(dummy_input, dummy_bitrate_condition)
         context_channels = [c.shape[1] for c in context]
 
         self.create_variable_image_generator_phase(
@@ -145,6 +161,8 @@ class CDCTrainable(nn.Module):
                     (backward_hyperdecode_channels[i], backward_hyperdecode_channels[i + 1])
                 )
 
+        self.hyper_prior = HyperPrior(channels=192)
+
 
         del extractor_encode_channels
         del feature_gen_channels
@@ -163,6 +181,7 @@ class CDCTrainable(nn.Module):
         for idx, (dim_in, dim_out) in enumerate(self.eec_pairs):
             block = nn.ModuleList([
                 ResnetBlock(dim_in, dim_out, large=True if idx==0 else False),
+                VariableBitrateCondition(1, dim_out),
                 DownSampling(dim_out, dim_out)
             ])
             self.extractor.append(block)
@@ -173,6 +192,7 @@ class CDCTrainable(nn.Module):
             cond_dim = dim_in if is_last else dim_out
             block = nn.ModuleList([
                 ResnetBlock(dim_in, cond_dim),
+                VariableBitrateCondition(1, cond_dim),
                 UpSampling(cond_dim, dim_out),
             ])
             self.feature_generator.append(block)
@@ -182,6 +202,7 @@ class CDCTrainable(nn.Module):
             is_last = True if idx == num_layers - 1 else False
             block = nn.ModuleList([
                 nn.Conv2d(dim_in, dim_out, kernel_size=3 if idx==0 else 5, padding=2 if idx==0 else 2, stride=1 if idx==0 else 2),
+                VariableBitrateCondition(1, dim_out),
                 nn.LeakyReLU(0.2) if not is_last else nn.Identity(),
             ])
             self.hyper_encoder.append(block)
@@ -192,38 +213,112 @@ class CDCTrainable(nn.Module):
             block = nn.ModuleList([
                 nn.ConvTranspose2d(dim_in, dim_out, kernel_size=5, stride=2, padding=2, output_padding=1) if not is_last \
                 else nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1),
+                VariableBitrateCondition(1, dim_out),
                 nn.LeakyReLU(0.2) if not is_last else nn.Identity(),
             ])
             self.hyper_decoder.append(block)
 
     # -------------------- Feature Extractor Phase -------------------- #
 
-    def feature_extract(self, image_tensor):
+    def feature_extract(self, image_tensor, bitrate_condition=None):
         if self.extractor_shape is None:
             self.extractor_shape = [image_tensor.shape]
 
         current_features = image_tensor
         for idx, block in enumerate(self.extractor):
             self.extractor_shape.append(current_features.shape)
-            for layer in block:
-                current_features = layer(current_features)
+            for ind, layer in enumerate(block):
+                if ind == 1:
+                    if bitrate_condition is not None:
+                        current_features = layer(current_features, bitrate_condition)
+                    else:
+                        continue
+                else:
+                    current_features = layer(current_features)
 
         latent_variable = current_features
+        
+        hyper_encoder_input = latent_variable
+        downscale_shape = [hyper_encoder_input.shape]
+        for idx, block in enumerate(self.hyper_encoder):
+            downscale_shape.append(hyper_encoder_input.shape)
+            for ind, layer in enumerate(block):
+                
+                if ind == 1 and idx < len(self.hyper_encoder) - 1:
+                    if bitrate_condition is not None:
+                        hyper_encoder_input = layer(hyper_encoder_input, bitrate_condition)
+                    else:
+                        continue
+                elif ind == 1 and idx == len(self.hyper_encoder) - 1:
+                    continue
+                else:
+                    hyper_encoder_input = layer(hyper_encoder_input)
 
-        return latent_variable
+        hyper_latent = hyper_encoder_input
+        quantize_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
+        hyper_decoder_input = quantize_hyper_latent
 
-    def feature_generate(self, latent_variable):
+        for idx, block in enumerate(self.hyper_decoder):
+            for ind, layer in enumerate(block):
+                if ind == 1 and idx < len(self.hyper_decoder) - 1:
+                    if bitrate_condition is not None:
+                        hyper_decoder_input = layer(hyper_decoder_input, bitrate_condition)
+                    else:
+                        continue
+                elif ind == 1 and idx == len(self.hyper_decoder) - 1:
+                    continue
+                else:
+                    hyper_decoder_input = layer(hyper_decoder_input)
+
+                if hyper_decoder_input.shape != downscale_shape[-(idx + 1)]:
+                    hyper_decoder_input = F.interpolate(hyper_decoder_input, size=downscale_shape[-(idx + 1)][2:], mode='bilinear', align_corners=False)
+
+        hyper_decoder_output = hyper_decoder_input
+        mean, scale = hyper_decoder_output.chunk(2, dim=1)
+        scale = scale.clamp(min=0.1)
+        latent_distribution = NormalDistribution(mean, scale)   
+        quantize_latent = quantize(latent_variable, "dequantize", latent_distribution.mean)
+        state_for_bpp = {
+            'latent_variable': latent_variable,
+            'hyper_latent': hyper_latent,
+            'latent_distribution': latent_distribution,
+        }
+        return quantize_latent, quantize_hyper_latent, state_for_bpp
+
+    def feature_generate(self, quantize_latent, bitrate_condition):
         features_output = []
 
-        current_features = latent_variable
+        current_features = quantize_latent
         for idx, block in enumerate(self.feature_generator):
-            for layer in block:
-                current_features = layer(current_features)
+            for ind, layer in enumerate(block):
+                if ind == 1:
+                    if bitrate_condition is not None:
+                        current_features = layer(current_features, bitrate_condition)
+                    else:
+                        continue
+                else:
+                    current_features = layer(current_features)
             if (current_features.shape != self.extractor_shape[-(idx + 1)]):
                 current_features = F.interpolate(current_features, size=self.extractor_shape[-(idx + 1)][2:], mode='bilinear', align_corners=False)
 
             features_output.append(current_features)
         return features_output[::-1]
+    
+    def bpp(self, shape, state4bpp):
+        B, _, H, W = shape
+        latent = state4bpp["latent_variable"]
+        hyper_latent = state4bpp["hyper_latent"]
+        latent_distribution = state4bpp["latent_distribution"]
+        if self.training:
+            q_hyper_latent = quantize(hyper_latent, "noise")
+            q_latent = quantize(latent, "noise")
+        else:
+            q_hyper_latent = quantize(hyper_latent, "dequantize", self.hyper_prior.medians)
+            q_latent = quantize(latent, "dequantize", latent_distribution.mean)
+        hyper_rate = -self.hyper_prior.likelihood(q_hyper_latent).log2()
+        cond_rate = -latent_distribution.likelihood(q_latent).log2()
+        bpp = (hyper_rate.sum(dim=(1, 2, 3)) + cond_rate.sum(dim=(1, 2, 3))) / (H * W)
+        return bpp
     
     # ---------------- Image Generator Phase -------------------- #
 
@@ -375,11 +470,15 @@ class CDCTrainable(nn.Module):
 
         return input_tensor
 
-    def extractor_forward(self, image_tensor):
+    def extractor_forward(self, image_tensor, bitrate_condition=None):
         image_tensor = image_tensor.to(self.device)
-        latent_variable = self.feature_extract(image_tensor)
-        features_output = self.feature_generate(latent_variable)
-        return features_output
+        quantize_latent, quantize_hyper_latent, state_for_bpp = self.feature_extract(image_tensor, bitrate_condition)
+        bpp_estimate = self.bpp(image_tensor.shape, state_for_bpp)
+        features_output = self.feature_generate(quantize_latent, bitrate_condition)
+        return features_output, bpp_estimate
+    
+    def prior_loss(self):
+        return self.hyper_prior.get_extraloss()
     
     # ---------------- Noise part -------------------- #
     def cosine_beta_schedule(self, timesteps=1000, s=0.008):
@@ -395,8 +494,8 @@ class CDCTrainable(nn.Module):
         return alphas
     
     def create_noise_phase_variable(self, timesteps=1000):
-        beta_schedule = self.cosine_beta_schedule(timesteps)
-        self.alphas_schedule = self.alpha_schedule(beta_schedule)
+        self.beta_schedule = self.cosine_beta_schedule(timesteps)
+        self.alphas_schedule = self.alpha_schedule(self.beta_schedule)
         self.ac = torch.tensor(np.cumprod(self.alphas_schedule, axis=0, dtype=np.float32)).to(self.device)
         self.sqrt_ac = torch.sqrt(self.ac)
         self.inv_ac = 1/self.ac 
@@ -412,10 +511,11 @@ class CDCTrainable(nn.Module):
         sqrt_omac = extract(self.sqrt_omac, step_t, input_tensor.shape)
         return sqrt_ac * input_tensor + sqrt_omac * noise
     
-    def calculate_loss(self, noise_input, noise, step_t, estimated_noise):
+    def calculate_loss(self, noise_input, noise, step_t, estimated_noise, start_image):
         estimated_x0 = self.denoise_step_t(noise_input, step_t, estimated_noise)
-        loss = F.mse_loss(noise, estimated_noise)
-        return loss, estimated_x0
+        mse_loss = F.mse_loss(noise, estimated_noise)
+        reconstruction_loss = F.l1_loss(estimated_x0, start_image)
+        return mse_loss, reconstruction_loss, estimated_x0
     
     def denoise_step_t(self, input_tensor, step_t, estimated_noise):
         # Formula: x_0 = sqrt_inv_ac * x_t - sqrt_inv_ac_m1 * estimated_noise
@@ -424,21 +524,52 @@ class CDCTrainable(nn.Module):
         return sqrt_inv_ac * input_tensor - sqrt_inv_ac_m1 * estimated_noise
 
     def forward(self, image_tensor):
-        # start_time = time.time()
-        context = self.extractor_forward(image_tensor)
+        bitrate_scalar_batch = torch.full((image_tensor.size(0),), torch.rand(1).item(), device=self.device)
+        context, bpp = self.extractor_forward(image_tensor, bitrate_scalar_batch)
         noise = torch.randn_like(image_tensor, device=self.device)
         timesteps_tensor = torch.randint(0, 1000, (image_tensor.shape[0],), device=self.device).long()
         noise_tensor = self.create_noise_step_t(image_tensor, timesteps_tensor, noise=noise)
-        float_timesteps_tensor = timesteps_tensor.float().unsqueeze(-1)/1000 # Convert to shape (batch_size, 1)
+        float_timesteps_tensor = timesteps_tensor.float().unsqueeze(-1)/1000 
         predict_noise = self.unet_forward(noise_tensor, context, float_timesteps_tensor)
-        mse_loss, estimated_x0 = self.calculate_loss(noise_tensor, noise, timesteps_tensor, predict_noise)
-        # print("Forward pass completed in {:.5f} seconds".format(time.time() - start_time))
-        estimated_x0 = estimated_x0[0].unsqueeze(0)  # Removeindices = torch.linspace(0, denoise_steps-1) batch dimension for output
-        return mse_loss, estimated_x0, noise_tensor
+        mse_loss, reconstruction_loss, estimated_x0 = self.calculate_loss(noise_tensor, noise, timesteps_tensor, predict_noise, image_tensor)
+        bpp_loss = bpp*self.scale_to_beta(bitrate_scalar_batch).mean()
+        estimated_x0 = estimated_x0[0].unsqueeze(0)
+        total_loss = mse_loss*0.7 + reconstruction_loss*0.3 + bpp_loss
+        return total_loss, estimated_x0, noise_tensor, mse_loss, reconstruction_loss, bpp_loss
+    
+    def scale_to_beta(self, bitrate_scale):
+        return 2 ** (3 * bitrate_scale) * 5e-4
+    
+    def forward_fake(self, image_tensor, denoise_steps=50):
+        torch.cuda.empty_cache()
+
+        noise = torch.randn_like(image_tensor, device=self.device)
+        timesteps_tensor = torch.randint(999, 1000, (image_tensor.shape[0],), device=self.device).long()
+        actual = torch.linspace(999, 0, denoise_steps, device=self.device).long()
+        noise_tensor = self.create_noise_step_t(noise, timesteps_tensor, noise=noise)
+
+        context = self.extractor_forward(image_tensor)
+        # print size of context in mb
+        for idx in range(denoise_steps):
+            torch.cuda.empty_cache()
+            if idx == 999:
+                break
+            print(f"Step: {999-idx+1}/{denoise_steps}")
+            float_timesteps_tensor = torch.full((image_tensor.shape[0],), actual[idx] / 1000, device=self.device).unsqueeze(-1) 
+            predict_noise = self.unet_forward(noise_tensor, context, float_timesteps_tensor) 
+            mse_loss, estimated_x0, loss_aux = self.calculate_loss(noise_tensor, noise, timesteps_tensor, predict_noise, image_tensor)
+            print(f"Loss at step {49-idx+1}: {mse_loss.item()}")
+            timesteps_tensor = torch.full((image_tensor.shape[0],), actual[idx-1] , device=self.device).long()
+            noise_tensor = self.create_noise_step_t(image_tensor, timesteps_tensor, noise=noise)
+            self.save_sample(estimated_x0, step=49-idx)
+            self.save_sample(noise_tensor, step=49-idx)  # Update timesteps_tensor for next step
+              # Save estimated x0 for each step
+
     
     # ================ DDIM Phase ================ #
     def create_ddim_phase_variable(self, denoise_steps = 50, eta=0):
         indices = torch.linspace(0, 999, denoise_steps, device=self.device).long()
+        self.ddim_timesteps = torch.linspace(0, 999, denoise_steps, device=self.device).long()
         self.ddim_ac = self.ac[indices]
         # np.set_printoptions(precision=5, suppress=True, linewidth=120)
         # print("ddim_ac:", self.ddim_ac.cpu().numpy())
@@ -478,20 +609,63 @@ class CDCTrainable(nn.Module):
     @torch.no_grad()
     def ddim_forward(self, image_tensor, denoise_steps=50):
         self.create_ddim_phase_variable(denoise_steps=denoise_steps)
-        context = self.extractor_forward(image_tensor)
+        context, bpp = self.extractor_forward(image_tensor)
         start_noise = torch.randn_like(image_tensor, device=self.device)
+        actual = torch.linspace(999, 0, denoise_steps, device=self.device).long()
+        # start_noise = self.create_noise_step_t(start_noise, actual[-1], noise=start_noise)
         
         for step_t in reversed(range(0, denoise_steps)):
             # self.save_sample(start_noise, step=step_t)
             print(f"DDIM Step: {step_t+1}/{denoise_steps}")
-            float_timesteps_tensor = torch.full((image_tensor.shape[0],), step_t / (denoise_steps - 1), device=self.device).unsqueeze(-1)  # Convert to shape (batch_size, 1)
+            float_timesteps_tensor = torch.full((image_tensor.shape[0],), actual[step_t]/1000, device=self.device).unsqueeze(-1)  # Convert to shape (batch_size, 1)
             timesteps_tensor = torch.full((image_tensor.shape[0],), step_t, device=self.device).long()  # Convert to shape (batch_size,)
             predict_noise = self.unet_forward(start_noise, context, float_timesteps_tensor)
             predict_x0 = self.ddim_denoise_step_t(start_noise, timesteps_tensor, predict_noise)
-            predict_x0 = predict_x0.clamp(0, 1.0)  # Clamp to valid range
+            predict_x0 = predict_x0.clamp(-1, 1.0)  # Clamp to valid range
             start_noise = self.ddim_input_for_nextstep(predict_x0, predict_noise, timesteps_tensor)
             self.save_sample(predict_x0, step=step_t)
+
+        # for i in reversed(range(denoise_steps)):
+        #     t_index = i
+        #     t = self.ddim_timesteps[i]  # thời gian thực tế
+        #     float_timesteps_tensor = torch.full(
+        #         (image_tensor.shape[0], 1), t.float() / 1000.0, device=self.device
+        #     )
+        #     timesteps_tensor = torch.full(
+        #         (image_tensor.shape[0],), i, device=self.device
+        #     )  # index để trích xuất hệ số từ các biến DDIM đã chuẩn bị
             
+        #     # UNet dự đoán noise
+        #     predict_noise = self.unet_forward(current_x, context, float_timesteps_tensor)
+        #     x0_pred = self.ddim_denoise_step_t(current_x, timesteps_tensor, predict_noise)
+        #     x0_pred = x0_pred.clamp(-1, 1.0)
+
+        #     # current_x = self.ddim_input_for_nextstep(x0_pred, predict_noise, timesteps_tensor)
+        #     current_x = self.create_noise_step_t(x0_pred, self.ddim_timesteps[i-1].repeat(image_tensor.size(0)), noise=predict_noise)
+        #     self.save_sample(x0_pred, step=i)
+            
+    @autocast(device_type='cuda', enabled=torch.cuda.is_available())
+    @torch.no_grad()
+    def ddim_forward_2(self, image_tensor, denoise_steps=1000):
+        context, bpp = self.extractor_forward(image_tensor)
+        start_noise = torch.randn_like(image_tensor, device=self.device)
+        actual = torch.linspace(999, 0, denoise_steps, device=self.device).long()
+        # start_noise = self.create_noise_step_t(start_noise, actual[-1], noise=start_noise)
+        
+        for step_t in reversed(range(0, denoise_steps)):
+            # self.save_sample(start_noise, step=step_t)
+            print(f"DDIM Step: {step_t+1}/{denoise_steps}")
+            float_timesteps_tensor = torch.full((image_tensor.shape[0],), actual[step_t]/1000, device=self.device).unsqueeze(-1)  # Convert to shape (batch_size, 1)
+            timesteps_tensor = torch.full((image_tensor.shape[0],), step_t, device=self.device).long()  # Convert to shape (batch_size,)
+            predict_noise = self.unet_forward(start_noise, context, float_timesteps_tensor)
+            # Make sure all constants are torch tensors and on the correct device
+            alpha = torch.tensor(self.alphas_schedule[step_t], device=self.device)
+            beta = torch.tensor(self.beta_schedule[step_t], device=self.device)
+            sqrt_omac = extract(self.sqrt_omac, timesteps_tensor, start_noise.shape)
+            noise = torch.randn_like(image_tensor, device=self.device)
+            start_noise = alpha * (start_noise - (1 - alpha) * predict_noise / sqrt_omac) + beta.sqrt() * noise
+            start_noise = start_noise.clamp(-1, 1.0)  # Clamp to valid range
+            self.save_sample(start_noise, step=step_t)
 
     def save_sample(self, tensor, path='./sample/', step=None):
         if not os.path.exists(path):
@@ -520,6 +694,7 @@ class CDCTrainable(nn.Module):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = CDCTrainable(device=device)
 model = model.to(device)
+# model.create_variable_for_extractor_phase()
 
 
 # model.create_ddim_phase_variable()
@@ -553,12 +728,12 @@ model = model.to(device)
 #     print(f"Epoch {epoch+1} completed in {time.time() - start_time:.5f} seconds")
 
 # For model summary with torchsummary
-try:
-    from torchsummary import summary
-    # Generate model summary for the CDCTrainable model
-    summary(model, input_size=(3, 256, 256), device=str(device))
-except ImportError:
-    print("Install torchsummary for model summary: pip install torchsummary")
+# try:
+#     from torchsummary import summary
+#     # Generate model summary for the CDCTrainable model
+#     summary(model, input_size=(3, 256, 256), device=str(device))
+# except ImportError:
+#     print("Install torchsummary for model summary: pip install torchsummary")
 
 # # Calculate actual memory consumption
 # if torch.cuda.is_available():
