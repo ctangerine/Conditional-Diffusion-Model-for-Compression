@@ -1,0 +1,120 @@
+import cv2
+import tqdm
+import numpy as np
+
+
+class MotionCompensation:
+	def __init__(self):
+		pass
+
+	def encode(self, current_frame, reference_frame, motion_vectors):
+		compensated_frame = self.apply_motion(reference_frame, motion_vectors)
+		residual = current_frame.astype(
+			np.int16) - compensated_frame.astype(np.int16)
+		return residual
+
+	def decode(self, reference_frame, motion_vectors, residual):
+		compensated_frame = self.apply_motion(reference_frame, motion_vectors)
+		reconstructed_frame = compensated_frame.astype(np.int16) + residual
+		return np.clip(reconstructed_frame, 0, 255).astype(np.uint8)
+
+	def video_encode(self, video_path, save_to=None):
+		cap = cv2.VideoCapture(video_path)
+		frames = []
+		while True:
+			ret, frame = cap.read()
+			if not ret:
+				break
+			frames.append(frame)
+		cap.release()
+
+		if len(frames) < 2:
+			raise RuntimeError("Video must have at least two frames.")
+
+		height, width, channels = frames[0].shape
+		motion_vectors_list = []
+		residuals = []
+		cap = cv2.VideoCapture(video_path)
+		fps = cap.get(cv2.CAP_PROP_FPS)
+		print(f"Video loaded: {video_path}, FPS: {fps}, Frames: {len(frames)}")
+		cap.release()
+		print(f"Video FPS: {fps}")
+
+		for i in tqdm.tqdm(range(1, len(frames)), desc="Encoding frames"):
+			# Dummy motion vectors: zeros
+			motion_vectors = np.zeros((height, width, 2), dtype=np.int16)
+			residual = self.encode(frames[i], frames[i-1], motion_vectors)
+			motion_vectors_list.append(motion_vectors)
+			residuals.append(residual)
+
+		if save_to:
+			# Save motion vectors and residuals to files
+			np.savez(save_to, motion_vectors=motion_vectors_list, residuals=residuals, reference_frame=frames[0], fps=fps)
+
+		reference_frame = frames[0]
+		return reference_frame, motion_vectors_list, residuals, fps
+
+	def video_decode(self, reference_frame=None, motion_vectors_list=None, residuals=None, fps=None, read_from=None, save_to=None):
+		if read_from:
+			data = np.load(read_from)
+			motion_vectors_list = data["motion_vectors"]
+			residuals = data["residuals"]
+			reference_frame = data["reference_frame"]
+			fps = data["fps"]
+
+		reconstructed_frames = []
+		ref = reference_frame
+
+		for i in tqdm.tqdm(range(len(motion_vectors_list)), desc="Decoding frames"):
+			motion_vectors = motion_vectors_list[i]
+			residual = residuals[i]
+			reconstructed_frame = self.decode(ref, motion_vectors, residual)
+			reconstructed_frames.append(reconstructed_frame)
+			ref = reconstructed_frame  # ✅ Update reference for next frame
+
+
+		if save_to:
+			# Save reconstructed frames to a video file
+			fourcc = cv2.VideoWriter_fourcc(*'XVID')
+			height, width, _ = reconstructed_frames[0].shape
+			out = cv2.VideoWriter(save_to, fourcc, fps, (width, height))
+			for frame in tqdm.tqdm(reconstructed_frames, desc="Saving frames"):
+				out.write(frame)
+			out.release()
+			print(f"Video saved to {save_to} with FPS={fps}")
+		return reconstructed_frames
+
+	def apply_motion(self, frame, motion_vectors):
+		"""
+		Dummy implementation: No actual motion applied. Just placeholder for 3-channel.
+		Should apply vector (dx, dy) to each pixel.
+		"""
+		# Currently: just returns the input frame
+		# For example purposes; implement motion application here
+		return frame
+
+
+if __name__ == "__main__":
+	video_path = r"D:\videos\video.avi"
+	mc = MotionCompensation()
+	reference_frame, motion_vectors, residuals, fps = mc.video_encode(video_path)
+
+	# decoded = mc.video_decode(
+	# 	read_from="motion_data.npz",
+	# 	save_to="reconstructed_video.avi"
+	# )
+	# Yes, the reference_frame should be the first frame of the video.
+	# For example:
+	reference_frame = cv2.VideoCapture(video_path)
+	ret, first_frame = reference_frame.read()
+	reference_frame.release()
+	if not ret:
+		raise RuntimeError("Could not read the first frame from the video.")
+
+	decoded = mc.video_decode(
+		reference_frame=first_frame,
+		motion_vectors_list=motion_vectors,
+		residuals=residuals,
+		fps=fps,
+		save_to="reconstructed_video.avi"
+	)
